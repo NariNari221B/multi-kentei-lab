@@ -72,11 +72,26 @@ def save_quiz_results(user_id, user_answers):
     correct_count = 0
     
     for ans in user_answers:
+        detailed_result = None
+        
         if ans["format_type"] == "multi-dropdown":
             target_correct = ans["correct_answer"]
             if isinstance(target_correct, str):
                 target_correct = json.loads(target_correct)
-            is_correct = (ans["user_answer"] == target_correct)
+            
+            detailed = {}
+            all_correct = True
+            # ア・イ・ウ・エ ごとの正誤を個別に判定
+            for key, correct_val in target_correct.items():
+                user_val = ans["user_answer"].get(key)
+                is_key_correct = (user_val == correct_val)
+                detailed[key] = is_key_correct
+                if not is_key_correct:
+                    all_correct = False
+            
+            is_correct = all_correct
+            detailed_result = detailed
+            ans["detailed_result"] = detailed # 結果表示画面用にセッションにも保持
         else:
             is_correct = (str(ans["user_answer"]).strip().lower() == str(ans["correct_answer"]).strip().lower())
             
@@ -87,7 +102,8 @@ def save_quiz_results(user_id, user_answers):
         history_records.append({
             "user_id": user_id,
             "question_id": ans["question_id"],
-            "is_correct": is_correct
+            "is_correct": is_correct,
+            "detailed_result": detailed_result # データベースに部分点を保存
         })
     
     if history_records:
@@ -97,7 +113,6 @@ def save_quiz_results(user_id, user_answers):
 
 # --- 弱点分析データの取得・グラフ描画処理 ---
 def render_analytics_report(user_id):
-    # 検定一覧を取得してセレクトボックスを生成
     exams_res = supabase.table("exams").select("id, name").execute()
     exams = exams_res.data
     
@@ -112,21 +127,19 @@ def render_analytics_report(user_id):
     selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()))
     selected_exam_id = exam_options[selected_exam_name]
 
-    # 解答履歴と問題データ（exam_idを追加取得）を取得
-    res = supabase.table("answer_history").select("is_correct, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
+    # ★ detailed_result（部分点）も一緒に取得する
+    res = supabase.table("answer_history").select("is_correct, detailed_result, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     
     if not history_data:
         st.info("💡 まだ解答履歴データがありません。検定を受験するとここに弱点分析レポートが表示されます！")
         return
 
-    # 選択された検定IDでデータをフィルタリング
     filtered_data = []
     for record in history_data:
         q = record.get("questions")
         if not q:
             continue
-        # selected_exam_id が None の場合は全てを対象、指定がある場合は exam_id が一致するものだけ対象
         if selected_exam_id is None or q.get("exam_id") == selected_exam_id:
             filtered_data.append(record)
             
@@ -134,7 +147,6 @@ def render_analytics_report(user_id):
         st.warning(f"「{selected_exam_name}」の受験履歴がありません。検定を受験してデータを蓄積しましょう！")
         return
 
-    # フィルタリングされたデータで集計
     cat_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     fmt_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     
@@ -146,28 +158,44 @@ def render_analytics_report(user_id):
         "multi-dropdown": "複数穴埋め"
     }
 
+    total_q_count = len(filtered_data)
+    total_items = 0
+    correct_items = 0
+
+    # フィルタリングされたデータで集計
     for record in filtered_data:
         q = record.get("questions")
         is_correct = record["is_correct"]
+        detailed = record.get("detailed_result")
         category = q.get("knowledge_category", "未分類")
         fmt = fmt_map.get(q.get("format_type"), q.get("format_type", "その他"))
         
-        cat_stats[category]["total"] += 1
-        if is_correct:
-            cat_stats[category]["correct"] += 1
-            
-        fmt_stats[fmt]["total"] += 1
-        if is_correct:
-            fmt_stats[fmt]["correct"] += 1
+        if detailed:
+            # ★ 複数穴埋めの場合は、空欄ごとに部分点を集計（ア・イ・ウ・エそれぞれが分析対象になる）
+            for key, key_is_correct in detailed.items():
+                cat_stats[category]["total"] += 1
+                fmt_stats[fmt]["total"] += 1
+                total_items += 1
+                if key_is_correct:
+                    cat_stats[category]["correct"] += 1
+                    fmt_stats[fmt]["correct"] += 1
+                    correct_items += 1
+        else:
+            # 通常の問題
+            cat_stats[category]["total"] += 1
+            fmt_stats[fmt]["total"] += 1
+            total_items += 1
+            if is_correct:
+                cat_stats[category]["correct"] += 1
+                fmt_stats[fmt]["correct"] += 1
+                correct_items += 1
 
-    total_answers = len(filtered_data)
-    total_correct = sum(1 for r in filtered_data if r["is_correct"])
-    overall_accuracy = int((total_correct / total_answers) * 100) if total_answers > 0 else 0
+    overall_accuracy = int((correct_items / total_items) * 100) if total_items > 0 else 0
     
     m1, m2, m3 = st.columns(3)
-    m1.metric("累計解答数", f"{total_answers} 回")
-    m2.metric("累計正解数", f"{total_correct} 回")
-    m3.metric("正解率", f"{overall_accuracy} %")
+    m1.metric("解答問題数", f"{total_q_count} 問")
+    m2.metric("実質正答数 (部分点含む)", f"{correct_items} / {total_items}")
+    m3.metric("総合正答率", f"{overall_accuracy} %")
     
     st.divider()
 
@@ -176,7 +204,6 @@ def render_analytics_report(user_id):
     categories = list(cat_stats.keys())
     cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) for c in categories]
     
-    # グラフが描画できるように開始点と終了点を繋ぐ処理
     if categories:
         r_data = cat_accuracies + [cat_accuracies[0]]
         theta_data = categories + [categories[0]]
@@ -215,6 +242,7 @@ def render_analytics_report(user_id):
         fig_bar.update_traces(textposition='outside')
         fig_bar.update_layout(showlegend=False, coloraxis_showscale=False, margin=dict(t=30, b=20))
         st.plotly_chart(fig_bar, use_container_width=True)
+
 
 # --- 画面UI ---
 st.title("🎓 マルチ検定ラボ")
@@ -259,7 +287,6 @@ else:
         
         main_tab1, main_tab2 = st.tabs(["📝 検定受験", "📊 弱点分析レポート"])
         
-        # --- タブ1: 検定選択 & 開始 ---
         with main_tab1:
             st.write("### 受験する検定を選択")
             exams_res = supabase.table("exams").select("*").execute()
@@ -287,7 +314,6 @@ else:
                         st.session_state.quiz_started = True
                         st.rerun()
 
-        # --- タブ2: 弱点分析レポート ---
         with main_tab2:
             st.write("### 累計解答データ分析")
             render_analytics_report(st.session_state.user.id)
@@ -298,7 +324,6 @@ else:
         q_idx = st.session_state.current_q_idx
         total_q = len(questions)
         
-        # すべて解き終わった場合
         if q_idx >= total_q:
             if not st.session_state.quiz_saved:
                 st.session_state.correct_count = save_quiz_results(
@@ -307,34 +332,37 @@ else:
                 )
                 st.session_state.quiz_saved = True
             
-            correct_cnt = st.session_state.correct_count
-            score_percent = int((correct_cnt / total_q) * 100)
-            
             st.balloons()
             st.success("🎉 お疲れ様でした！すべての解答が終了しました。")
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.metric(label="正解数", value=f"{correct_cnt} / {total_q} 問")
-            with col_b:
-                st.metric(label="正解率", value=f"{score_percent}%")
-            
-            st.divider()
             st.write("### 🔍 解答一覧と正誤結果")
             
             for idx, ans in enumerate(st.session_state.user_answers):
-                status_icon = "✅ 正解" if ans["is_correct"] else "❌ 不正解"
+                # ★ 結果アイコンの判定（部分正解に対応）
+                if "detailed_result" in ans and ans["detailed_result"]:
+                    correct_keys = sum(1 for v in ans["detailed_result"].values() if v)
+                    total_keys = len(ans["detailed_result"])
+                    if correct_keys == total_keys:
+                        status_icon = "✅ 完全正解"
+                    elif correct_keys > 0:
+                        status_icon = f"⚠️ 部分正解 ({correct_keys}/{total_keys})"
+                    else:
+                        status_icon = "❌ 不正解"
+                else:
+                    status_icon = "✅ 正解" if ans["is_correct"] else "❌ 不正解"
+
                 with st.expander(f"第 {idx+1} 問 ({ans['knowledge_category']}) - {status_icon}"):
-                    if isinstance(ans["user_answer"], dict):
-                        user_ans_str = ", ".join([f"{k}: {v}" for k, v in ans["user_answer"].items()])
-                        
+                    # ★ 複数穴埋めの場合は、ア・イ・ウ・エごとの正誤リストを表示
+                    if ans["format_type"] == "multi-dropdown":
                         target_correct = ans["correct_answer"]
                         if isinstance(target_correct, str):
                             target_correct = json.loads(target_correct)
-                        correct_ans_str = ", ".join([f"{k}: {v}" for k, v in target_correct.items()])
-                        
-                        st.write(f"**あなたの回答:** `{user_ans_str}`")
-                        st.write(f"**正解:** `{correct_ans_str}`")
+                            
+                        st.write("各空欄の正誤:")
+                        for k in target_correct.keys():
+                            u_val = ans["user_answer"].get(k, "未回答")
+                            c_val = target_correct.get(k, "")
+                            icon = "✅" if ans["detailed_result"].get(k) else "❌"
+                            st.write(f"- （{k}） {icon} あなたの回答: `{u_val}` / 正解: `{c_val}`")
                     else:
                         st.write(f"**あなたの回答:** `{ans['user_answer']}`")
                         st.write(f"**正解:** `{ans['correct_answer']}`")
@@ -346,20 +374,16 @@ else:
                 st.session_state.quiz_saved = False
                 st.rerun()
         
-        # 出題中
         else:
             q = questions[q_idx]
-            
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
             st.progress((q_idx + 1) / total_q)
-            
             st.subheader(f"Q. {q['content']}")
             
             if q["format_type"] in ["video-4-choice", "video-text-input"] and q.get("video_url"):
                 render_masked_video(q["video_url"])
             
             user_input = None
-            
             if q["format_type"] in ["4-choice", "video-4-choice"]:
                 choices = q["choices"] if isinstance(q["choices"], list) else []
                 user_input = st.radio("回答を選択してください:", choices, key=f"q_{q_idx}")
