@@ -1,0 +1,4 @@
+# 機密情報ファイルをGitHubにアップロードさせない設定
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
