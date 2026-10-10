@@ -3,6 +3,7 @@ import streamlit.components.v1 as components
 import plotly.graph_objects as go
 import plotly.express as px
 from collections import defaultdict
+import json
 from database import supabase
 
 st.set_page_config(page_title="マルチ検定ラボ", page_icon="🎓", layout="centered")
@@ -71,7 +72,15 @@ def save_quiz_results(user_id, user_answers):
     correct_count = 0
     
     for ans in user_answers:
-        is_correct = (ans["user_answer"].strip().lower() == ans["correct_answer"].strip().lower())
+        # multi-dropdown 形式の場合は全一致で正誤判定
+        if ans["format_type"] == "multi-dropdown":
+            target_correct = ans["correct_answer"]
+            if isinstance(target_correct, str):
+                target_correct = json.loads(target_correct)
+            is_correct = (ans["user_answer"] == target_correct)
+        else:
+            is_correct = (str(ans["user_answer"]).strip().lower() == str(ans["correct_answer"]).strip().lower())
+            
         ans["is_correct"] = is_correct
         if is_correct:
             correct_count += 1
@@ -89,7 +98,6 @@ def save_quiz_results(user_id, user_answers):
 
 # --- 弱点分析データの取得・グラフ描画処理 ---
 def render_analytics_report(user_id):
-    # answer_history と questions テーブルを結合してデータを取得
     res = supabase.table("answer_history").select("is_correct, questions(knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     
@@ -97,16 +105,15 @@ def render_analytics_report(user_id):
         st.info("💡 まだ解答履歴データがありません。検定を受験するとここに弱点分析レポートが表示されます！")
         return
 
-    # データ集計用辞書
     cat_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     fmt_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     
-    # 英語形式名を日本語にマッピング
     fmt_map = {
         "4-choice": "4択問題",
         "text-input": "穴埋め記述",
         "video-4-choice": "動画付き4択",
-        "video-text-input": "動画付き穴埋め"
+        "video-text-input": "動画付き穴埋め",
+        "multi-dropdown": "複数穴埋め"
     }
 
     for record in history_data:
@@ -118,17 +125,14 @@ def render_analytics_report(user_id):
         category = q.get("knowledge_category", "未分類")
         fmt = fmt_map.get(q.get("format_type"), q.get("format_type", "その他"))
         
-        # 分野別集計
         cat_stats[category]["total"] += 1
         if is_correct:
             cat_stats[category]["correct"] += 1
             
-        # 形式別集計
         fmt_stats[fmt]["total"] += 1
         if is_correct:
             fmt_stats[fmt]["correct"] += 1
 
-    # 総解答数のサマリー表示
     total_answers = len(history_data)
     total_correct = sum(1 for r in history_data if r["is_correct"])
     overall_accuracy = int((total_correct / total_answers) * 100) if total_answers > 0 else 0
@@ -140,12 +144,11 @@ def render_analytics_report(user_id):
     
     st.divider()
 
-    # 1. 知識分野別分析 (レーダーチャート)
+    # 1. 知識分野別分析
     st.write("### 🎯 知識分野別の正答率")
     categories = list(cat_stats.keys())
     cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) for c in categories]
     
-    # レーダーチャートを閉じるため先頭要素を末尾に追加
     r_data = cat_accuracies + [cat_accuracies[0]]
     theta_data = categories + [categories[0]]
     
@@ -165,7 +168,7 @@ def render_analytics_report(user_id):
     )
     st.plotly_chart(fig_radar, use_container_width=True)
 
-    # 2. 出題形式別分析 (棒グラフ)
+    # 2. 出題形式別分析
     st.write("### 📝 出題形式別の正答率")
     formats = list(fmt_stats.keys())
     fmt_accuracies = [int((fmt_stats[f]["correct"] / fmt_stats[f]["total"]) * 100) for f in formats]
@@ -224,7 +227,6 @@ else:
         
         st.divider()
         
-        # タブメニューによる機能切り替え
         main_tab1, main_tab2 = st.tabs(["📝 検定受験", "📊 弱点分析レポート"])
         
         # --- タブ1: 検定選択 & 開始 ---
@@ -293,8 +295,20 @@ else:
             for idx, ans in enumerate(st.session_state.user_answers):
                 status_icon = "✅ 正解" if ans["is_correct"] else "❌ 不正解"
                 with st.expander(f"第 {idx+1} 問 ({ans['knowledge_category']}) - {status_icon}"):
-                    st.write(f"**あなたの回答:** `{ans['user_answer']}`")
-                    st.write(f"**正解:** `{ans['correct_answer']}`")
+                    # 辞書形式（multi-dropdown）の場合は見やすくテキスト整形
+                    if isinstance(ans["user_answer"], dict):
+                        user_ans_str = ", ".join([f"{k}: {v}" for k, v in ans["user_answer"].items()])
+                        
+                        target_correct = ans["correct_answer"]
+                        if isinstance(target_correct, str):
+                            target_correct = json.loads(target_correct)
+                        correct_ans_str = ", ".join([f"{k}: {v}" for k, v in target_correct.items()])
+                        
+                        st.write(f"**あなたの回答:** `{user_ans_str}`")
+                        st.write(f"**正解:** `{correct_ans_str}`")
+                    else:
+                        st.write(f"**あなたの回答:** `{ans['user_answer']}`")
+                        st.write(f"**正解:** `{ans['correct_answer']}`")
             
             st.write("")
             if st.button("ダッシュボードに戻る", type="primary"):
@@ -315,23 +329,44 @@ else:
             if q["format_type"] in ["video-4-choice", "video-text-input"] and q.get("video_url"):
                 render_masked_video(q["video_url"])
             
+            # --- 出題形式に応じたフォーム切り替え ---
             user_input = None
+            
             if q["format_type"] in ["4-choice", "video-4-choice"]:
                 choices = q["choices"] if isinstance(q["choices"], list) else []
                 user_input = st.radio("回答を選択してください:", choices, key=f"q_{q_idx}")
+                
+            elif q["format_type"] == "multi-dropdown":
+                dropdown_choices = q["choices"]
+                if isinstance(dropdown_choices, str):
+                    dropdown_choices = json.loads(dropdown_choices)
+                
+                selected_answers = {}
+                st.write("各空欄に当てはまる項目を選択してください:")
+                cols = st.columns(len(dropdown_choices))
+                
+                for idx_col, (label, options) in enumerate(dropdown_choices.items()):
+                    with cols[idx_col]:
+                        selected_answers[label] = st.selectbox(
+                            f"（ {label} ）", 
+                            options=options, 
+                            key=f"q_{q_idx}_{label}"
+                        )
+                user_input = selected_answers
+                
             else:
                 user_input = st.text_input("解答を入力してください:", key=f"q_{q_idx}")
             
             st.write("")
             if st.button("回答を送信して次へ ➔", type="primary"):
-                if not user_input or user_input.strip() == "":
+                if not user_input or (isinstance(user_input, str) and user_input.strip() == ""):
                     st.warning("回答を入力・選択してください。")
                 else:
                     st.session_state.user_answers.append({
                         "question_id": q["id"],
                         "knowledge_category": q["knowledge_category"],
                         "format_type": q["format_type"],
-                        "user_answer": user_input.strip(),
+                        "user_answer": user_input,
                         "correct_answer": q["correct_answer"]
                     })
                     st.session_state.current_q_idx += 1
