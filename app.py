@@ -72,7 +72,6 @@ def save_quiz_results(user_id, user_answers):
     correct_count = 0
     
     for ans in user_answers:
-        # multi-dropdown 形式の場合は全一致で正誤判定
         if ans["format_type"] == "multi-dropdown":
             target_correct = ans["correct_answer"]
             if isinstance(target_correct, str):
@@ -98,13 +97,44 @@ def save_quiz_results(user_id, user_answers):
 
 # --- 弱点分析データの取得・グラフ描画処理 ---
 def render_analytics_report(user_id):
-    res = supabase.table("answer_history").select("is_correct, questions(knowledge_category, format_type)").eq("user_id", user_id).execute()
+    # 検定一覧を取得してセレクトボックスを生成
+    exams_res = supabase.table("exams").select("id, name").execute()
+    exams = exams_res.data
+    
+    if not exams:
+        st.info("検定データがありません。")
+        return
+        
+    exam_options = {"すべての検定 (総合)": None}
+    for exam in exams:
+        exam_options[exam["name"]] = exam["id"]
+        
+    selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()))
+    selected_exam_id = exam_options[selected_exam_name]
+
+    # 解答履歴と問題データ（exam_idを追加取得）を取得
+    res = supabase.table("answer_history").select("is_correct, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     
     if not history_data:
         st.info("💡 まだ解答履歴データがありません。検定を受験するとここに弱点分析レポートが表示されます！")
         return
 
+    # 選択された検定IDでデータをフィルタリング
+    filtered_data = []
+    for record in history_data:
+        q = record.get("questions")
+        if not q:
+            continue
+        # selected_exam_id が None の場合は全てを対象、指定がある場合は exam_id が一致するものだけ対象
+        if selected_exam_id is None or q.get("exam_id") == selected_exam_id:
+            filtered_data.append(record)
+            
+    if not filtered_data:
+        st.warning(f"「{selected_exam_name}」の受験履歴がありません。検定を受験してデータを蓄積しましょう！")
+        return
+
+    # フィルタリングされたデータで集計
     cat_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     fmt_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     
@@ -116,11 +146,8 @@ def render_analytics_report(user_id):
         "multi-dropdown": "複数穴埋め"
     }
 
-    for record in history_data:
+    for record in filtered_data:
         q = record.get("questions")
-        if not q:
-            continue
-        
         is_correct = record["is_correct"]
         category = q.get("knowledge_category", "未分類")
         fmt = fmt_map.get(q.get("format_type"), q.get("format_type", "その他"))
@@ -133,14 +160,14 @@ def render_analytics_report(user_id):
         if is_correct:
             fmt_stats[fmt]["correct"] += 1
 
-    total_answers = len(history_data)
-    total_correct = sum(1 for r in history_data if r["is_correct"])
+    total_answers = len(filtered_data)
+    total_correct = sum(1 for r in filtered_data if r["is_correct"])
     overall_accuracy = int((total_correct / total_answers) * 100) if total_answers > 0 else 0
     
     m1, m2, m3 = st.columns(3)
     m1.metric("累計解答数", f"{total_answers} 回")
     m2.metric("累計正解数", f"{total_correct} 回")
-    m3.metric("通算正解率", f"{overall_accuracy} %")
+    m3.metric("正解率", f"{overall_accuracy} %")
     
     st.divider()
 
@@ -149,42 +176,45 @@ def render_analytics_report(user_id):
     categories = list(cat_stats.keys())
     cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) for c in categories]
     
-    r_data = cat_accuracies + [cat_accuracies[0]]
-    theta_data = categories + [categories[0]]
-    
-    fig_radar = go.Figure(
-        data=go.Scatterpolar(
-            r=r_data,
-            theta=theta_data,
-            fill='toself',
-            name='正答率 (%)',
-            line_color='#1E88E5'
+    # グラフが描画できるように開始点と終了点を繋ぐ処理
+    if categories:
+        r_data = cat_accuracies + [cat_accuracies[0]]
+        theta_data = categories + [categories[0]]
+        
+        fig_radar = go.Figure(
+            data=go.Scatterpolar(
+                r=r_data,
+                theta=theta_data,
+                fill='toself',
+                name='正答率 (%)',
+                line_color='#1E88E5'
+            )
         )
-    )
-    fig_radar.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-        showlegend=False,
-        margin=dict(t=20, b=20, l=40, r=40)
-    )
-    st.plotly_chart(fig_radar, use_container_width=True)
+        fig_radar.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+            showlegend=False,
+            margin=dict(t=20, b=20, l=40, r=40)
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
 
     # 2. 出題形式別分析
     st.write("### 📝 出題形式別の正答率")
     formats = list(fmt_stats.keys())
     fmt_accuracies = [int((fmt_stats[f]["correct"] / fmt_stats[f]["total"]) * 100) for f in formats]
     
-    fig_bar = px.bar(
-        x=formats, 
-        y=fmt_accuracies,
-        labels={'x': '出題形式', 'y': '正答率 (%)'},
-        range_y=[0, 100],
-        text=[f"{v}%" for v in fmt_accuracies],
-        color=fmt_accuracies,
-        color_continuous_scale="Blues"
-    )
-    fig_bar.update_traces(textposition='outside')
-    fig_bar.update_layout(showlegend=False, coloraxis_showscale=False, margin=dict(t=30, b=20))
-    st.plotly_chart(fig_bar, use_container_width=True)
+    if formats:
+        fig_bar = px.bar(
+            x=formats, 
+            y=fmt_accuracies,
+            labels={'x': '出題形式', 'y': '正答率 (%)'},
+            range_y=[0, 100],
+            text=[f"{v}%" for v in fmt_accuracies],
+            color=fmt_accuracies,
+            color_continuous_scale="Blues"
+        )
+        fig_bar.update_traces(textposition='outside')
+        fig_bar.update_layout(showlegend=False, coloraxis_showscale=False, margin=dict(t=30, b=20))
+        st.plotly_chart(fig_bar, use_container_width=True)
 
 # --- 画面UI ---
 st.title("🎓 マルチ検定ラボ")
@@ -295,7 +325,6 @@ else:
             for idx, ans in enumerate(st.session_state.user_answers):
                 status_icon = "✅ 正解" if ans["is_correct"] else "❌ 不正解"
                 with st.expander(f"第 {idx+1} 問 ({ans['knowledge_category']}) - {status_icon}"):
-                    # 辞書形式（multi-dropdown）の場合は見やすくテキスト整形
                     if isinstance(ans["user_answer"], dict):
                         user_ans_str = ", ".join([f"{k}: {v}" for k, v in ans["user_answer"].items()])
                         
@@ -329,7 +358,6 @@ else:
             if q["format_type"] in ["video-4-choice", "video-text-input"] and q.get("video_url"):
                 render_masked_video(q["video_url"])
             
-            # --- 出題形式に応じたフォーム切り替え ---
             user_input = None
             
             if q["format_type"] in ["4-choice", "video-4-choice"]:
