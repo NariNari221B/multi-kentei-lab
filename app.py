@@ -53,7 +53,7 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# --- 3. 動画マスキング & 操作不可・区間ループ描画関数 ---
+# --- 3. 動画マスキング (上部枠) & 操作不可・区間ループ描画関数 ---
 def time_to_seconds(t_str):
     if not t_str: return None
     try:
@@ -69,12 +69,10 @@ def time_to_seconds(t_str):
     return None
 
 def render_masked_video(video_url: str):
-    # ? が複数ある誤ったURL形式を自動補正
     if video_url.count('?') > 1:
         first_q = video_url.find('?')
         video_url = video_url[:first_q + 1] + video_url[first_q + 1:].replace('?', '&')
 
-    # 正規表現で多様なYouTube URLから11桁のVideo IDを自動抽出
     pattern = r'(?:v=|\/embed\/|\/v\/|youtu\.be\/|\/shorts\/)([a-zA-Z0-9_-]{11})'
     match = re.search(pattern, video_url)
     
@@ -84,7 +82,6 @@ def render_masked_video(video_url: str):
         
     video_id = match.group(1)
     
-    # URLパラメータ（start_time, end_time, loops）のパース
     parsed = urllib.parse.urlparse(video_url)
     qs = urllib.parse.parse_qs(parsed.query)
     
@@ -94,7 +91,6 @@ def render_masked_video(video_url: str):
     
     start_val = start_sec if start_sec is not None else 0
 
-    # controls=0 (コントロール非表示), disablekb=1 (キーボード操作無効)
     embed_params = [
         "enablejsapi=1",
         "autoplay=0",
@@ -121,11 +117,11 @@ def render_masked_video(video_url: str):
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
         </iframe>
         
-        <!-- 透明な保護カバー（画面クリックによる再生・一時停止・シークを完全に遮断） -->
-        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 85%; background: transparent; z-index: 10;"></div>
+        <!-- 透明な保護カバー（画面全域クリック遮断） -->
+        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: transparent; z-index: 10;"></div>
         
-        <!-- 15% 黒枠マスキング -->
-        <div style="position: absolute; bottom: 0; left: 0; width: 100%; height: 15%; background-color: #000000; pointer-events: none; z-index: 20;"></div>
+        <!-- ★ 15% 黒枠マスキング（画面上部） -->
+        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 15%; background-color: #000000; pointer-events: none; z-index: 20;"></div>
     </div>
 
     <!-- 専用の再生ボタン -->
@@ -169,14 +165,12 @@ def render_masked_video(video_url: str):
       }}
 
       function onPlayerStateChange(event) {{
-        // 動画終了時 (0) で指定回数までループ
         if (event.data === 0) {{
           playCount++;
           if (playCount < maxPlays) {{
             player.seekTo(startSeconds);
             player.playVideo();
           }} else {{
-            // 全ループ終了
             isPlaying = false;
             var btn = document.getElementById('play-btn');
             btn.disabled = false;
@@ -195,9 +189,7 @@ def render_masked_video(video_url: str):
       initPlayer();
     </script>
     """
-    # ボタン等の高さを考慮して height を 430 に拡張
     components.html(html_code, height=430)
-
 
 # --- 4. 採点 & 解答履歴保存処理 (部分点対応) ---
 def save_quiz_results(user_id, user_answers):
@@ -301,7 +293,6 @@ def render_analytics_report(user_id):
         fmt = fmt_map.get(q.get("format_type"), q.get("format_type", "その他"))
         
         if detailed:
-            # 複数穴埋め問題の部分点集計
             for key, key_is_correct in detailed.items():
                 cat_stats[category]["total"] += 1
                 fmt_stats[fmt]["total"] += 1
@@ -328,7 +319,6 @@ def render_analytics_report(user_id):
     
     st.divider()
 
-    # 知識分野別分析グラフ
     st.write("### 🎯 知識分野別の正答率")
     categories = list(cat_stats.keys())
     cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) for c in categories]
@@ -353,7 +343,6 @@ def render_analytics_report(user_id):
         )
         st.plotly_chart(fig_radar, use_container_width=True)
 
-    # 出題形式別分析グラフ
     st.write("### 📝 出題形式別の正答率")
     formats = list(fmt_stats.keys())
     fmt_accuracies = [int((fmt_stats[f]["correct"] / fmt_stats[f]["total"]) * 100) for f in formats]
@@ -398,7 +387,6 @@ if st.session_state.user is None:
                 sign_up(signup_email, signup_password, signup_username)
 
 else:
-    # --- A. クイズ開始前（メインダッシュボード） ---
     if not st.session_state.quiz_started:
         profile_res = supabase.table("profiles").select("username").eq("id", st.session_state.user.id).execute()
         username = profile_res.data[0]["username"] if profile_res.data else "ゲスト"
@@ -445,13 +433,11 @@ else:
             st.write("### 累計解答データ分析")
             render_analytics_report(st.session_state.user.id)
 
-    # --- B. クイズ実行 Engine ＆ 採点結果画面 ---
     else:
         questions = st.session_state.questions
         q_idx = st.session_state.current_q_idx
         total_q = len(questions)
         
-        # 全問終了時
         if q_idx >= total_q:
             if not st.session_state.quiz_saved:
                 st.session_state.correct_count = save_quiz_results(
@@ -465,7 +451,6 @@ else:
             st.write("### 🔍 解答一覧と正誤結果")
             
             for idx, ans in enumerate(st.session_state.user_answers):
-                # 複数穴埋め等の部分正解アイコン判定
                 if "detailed_result" in ans and ans["detailed_result"]:
                     correct_keys = sum(1 for v in ans["detailed_result"].values() if v)
                     total_keys = len(ans["detailed_result"])
@@ -501,7 +486,6 @@ else:
                 st.session_state.quiz_saved = False
                 st.rerun()
         
-        # 出題中
         else:
             q = questions[q_idx]
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
