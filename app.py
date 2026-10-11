@@ -5,6 +5,7 @@ import plotly.express as px
 from collections import defaultdict
 import json
 import urllib.parse
+import re
 from database import supabase
 
 st.set_page_config(page_title="マルチ検定ラボ", page_icon="🎓", layout="centered")
@@ -52,7 +53,7 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# --- 3. 動画区間ループ・マスキング描画処理 ---
+# --- 3. 動画区間ループ・マスキング描画処理 (確実表示・安定版) ---
 def time_to_seconds(t_str):
     if not t_str: return None
     try:
@@ -68,56 +69,82 @@ def time_to_seconds(t_str):
     return None
 
 def render_masked_video(video_url: str):
+    # ? が複数ある誤ったURL形式を自動補正
+    if video_url.count('?') > 1:
+        first_q = video_url.find('?')
+        video_url = video_url[:first_q + 1] + video_url[first_q + 1:].replace('?', '&')
+
+    # 正規表現で多様なYouTube URLから11桁のVideo IDを自動抽出
+    pattern = r'(?:v=|\/embed\/|\/v\/|youtu\.be\/|\/shorts\/)([a-zA-Z0-9_-]{11})'
+    match = re.search(pattern, video_url)
+    
+    if not match:
+        st.error("⚠️ YouTube動画のIDが取得できませんでした。URLをご確認ください。")
+        return
+        
+    video_id = match.group(1)
+    
+    # URLパラメータ（start_time, end_time, loops）のパース
     parsed = urllib.parse.urlparse(video_url)
-    video_id = parsed.path.split('/')[-1]
     qs = urllib.parse.parse_qs(parsed.query)
     
     start_sec = time_to_seconds(qs.get('start_time', [''])[0]) if 'start_time' in qs else None
     end_sec = time_to_seconds(qs.get('end_time', [''])[0]) if 'end_time' in qs else None
     loop_count = int(qs.get('loops', ['3'])[0])
     
-    start_param = f"'start': {start_sec}," if start_sec is not None else ""
-    end_param = f"'end': {end_sec}," if end_sec is not None else ""
     start_val = start_sec if start_sec is not None else 0
+
+    # iframe用のURLクエリパラメータの構築
+    embed_params = [
+        "enablejsapi=1",
+        "autoplay=0",
+        "controls=1",
+        "modestbranding=1",
+        "rel=0",
+        "playsinline=1"
+    ]
+    if start_sec is not None:
+        embed_params.append(f"start={start_sec}")
+    if end_sec is not None:
+        embed_params.append(f"end={end_sec}")
+        
+    embed_src = f"https://www.youtube.com/embed/{video_id}?" + "&".join(embed_params)
 
     html_code = f"""
     <div style="position: relative; width: 100%; max-width: 640px; margin: 0 auto; aspect-ratio: 16/9; overflow: hidden; border-radius: 8px;">
-        <div id="ytplayer" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></div>
+        <!-- 最初からiframeを配置して確実に表示させる -->
+        <iframe 
+            id="ytplayer"
+            src="{embed_src}"
+            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none;"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+            allowfullscreen>
+        </iframe>
         <!-- 15% 黒枠マスキング -->
         <div style="position: absolute; bottom: 0; left: 0; width: 100%; height: 15%; background-color: #000000; pointer-events: none;"></div>
     </div>
 
     <script>
-      var tag = document.createElement('script');
-      tag.src = "https://www.youtube.com/iframe_api";
-      var firstScriptTag = document.getElementsByTagName('script')[0];
-      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-
       var player;
       var playCount = 0;
       var maxPlays = {loop_count};
       var startSeconds = {start_val};
 
-      function onYouTubeIframeAPIReady() {{
-        player = new YT.Player('ytplayer', {{
-          videoId: '{video_id}',
-          playerVars: {{
-            'autoplay': 0, 
-            'controls': 1,
-            'modestbranding': 1,
-            'rel': 0,
-            'playsinline': 1,
-            {start_param}
-            {end_param}
-          }},
-          events: {{
-            'onStateChange': onPlayerStateChange
-          }}
-        }});
+      // APIの読み込みを待ってプレイヤーオブジェクトを初期化
+      function initPlayer() {{
+        if (window.YT && window.YT.Player) {{
+          player = new YT.Player('ytplayer', {{
+            events: {{
+              'onStateChange': onPlayerStateChange
+            }}
+          }});
+        }} else {{
+          setTimeout(initPlayer, 200);
+        }}
       }}
 
       function onPlayerStateChange(event) {{
-        // 動画終了時 (0) にループさせる
+        // 動画終了時 (0) で指定秒数に戻ってループ
         if (event.data === 0) {{
           playCount++;
           if (playCount < maxPlays) {{
@@ -126,6 +153,15 @@ def render_masked_video(video_url: str):
           }}
         }}
       }}
+
+      // YouTube API スクリプトの動的ロード
+      if (!window.YT) {{
+        var tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+      }}
+      initPlayer();
     </script>
     """
     components.html(html_code, height=380)
