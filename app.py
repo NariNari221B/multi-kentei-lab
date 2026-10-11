@@ -53,7 +53,7 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# --- 3. 動画区間ループ・マスキング描画処理 (確実表示・安定版) ---
+# --- 3. 動画マスキング & 操作不可・区間ループ描画関数 ---
 def time_to_seconds(t_str):
     if not t_str: return None
     try:
@@ -94,11 +94,12 @@ def render_masked_video(video_url: str):
     
     start_val = start_sec if start_sec is not None else 0
 
-    # iframe用のURLクエリパラメータの構築
+    # controls=0 (コントロール非表示), disablekb=1 (キーボード操作無効)
     embed_params = [
         "enablejsapi=1",
         "autoplay=0",
-        "controls=1",
+        "controls=0",
+        "disablekb=1",
         "modestbranding=1",
         "rel=0",
         "playsinline=1"
@@ -112,16 +113,26 @@ def render_masked_video(video_url: str):
 
     html_code = f"""
     <div style="position: relative; width: 100%; max-width: 640px; margin: 0 auto; aspect-ratio: 16/9; overflow: hidden; border-radius: 8px;">
-        <!-- 最初からiframeを配置して確実に表示させる -->
+        <!-- YouTube iframe -->
         <iframe 
             id="ytplayer"
             src="{embed_src}"
             style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none;"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-            allowfullscreen>
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
         </iframe>
+        
+        <!-- 透明な保護カバー（画面クリックによる再生・一時停止・シークを完全に遮断） -->
+        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 85%; background: transparent; z-index: 10;"></div>
+        
         <!-- 15% 黒枠マスキング -->
-        <div style="position: absolute; bottom: 0; left: 0; width: 100%; height: 15%; background-color: #000000; pointer-events: none;"></div>
+        <div style="position: absolute; bottom: 0; left: 0; width: 100%; height: 15%; background-color: #000000; pointer-events: none; z-index: 20;"></div>
+    </div>
+
+    <!-- 専用の再生ボタン -->
+    <div style="text-align: center; margin-top: 12px;">
+        <button id="play-btn" onclick="startVideo()" style="padding: 10px 24px; font-size: 15px; font-weight: bold; border-radius: 6px; background-color: #1E88E5; color: white; border: none; cursor: pointer; transition: 0.2s;">
+            ▶ 動画を再生する（{loop_count}回自動再生）
+        </button>
     </div>
 
     <script>
@@ -129,8 +140,8 @@ def render_masked_video(video_url: str):
       var playCount = 0;
       var maxPlays = {loop_count};
       var startSeconds = {start_val};
+      var isPlaying = false;
 
-      // APIの読み込みを待ってプレイヤーオブジェクトを初期化
       function initPlayer() {{
         if (window.YT && window.YT.Player) {{
           player = new YT.Player('ytplayer', {{
@@ -143,18 +154,38 @@ def render_masked_video(video_url: str):
         }}
       }}
 
+      function startVideo() {{
+        if (player && !isPlaying) {{
+          isPlaying = true;
+          playCount = 0;
+          var btn = document.getElementById('play-btn');
+          btn.disabled = true;
+          btn.style.backgroundColor = '#9E9E9E';
+          btn.innerText = '⏳ 再生中...（操作不可）';
+          
+          player.seekTo(startSeconds);
+          player.playVideo();
+        }}
+      }}
+
       function onPlayerStateChange(event) {{
-        // 動画終了時 (0) で指定秒数に戻ってループ
+        // 動画終了時 (0) で指定回数までループ
         if (event.data === 0) {{
           playCount++;
           if (playCount < maxPlays) {{
             player.seekTo(startSeconds);
             player.playVideo();
+          }} else {{
+            // 全ループ終了
+            isPlaying = false;
+            var btn = document.getElementById('play-btn');
+            btn.disabled = false;
+            btn.style.backgroundColor = '#1E88E5';
+            btn.innerText = '▶ もう一度再生する（{loop_count}回自動再生）';
           }}
         }}
       }}
 
-      // YouTube API スクリプトの動的ロード
       if (!window.YT) {{
         var tag = document.createElement('script');
         tag.src = "https://www.youtube.com/iframe_api";
@@ -164,7 +195,9 @@ def render_masked_video(video_url: str):
       initPlayer();
     </script>
     """
-    components.html(html_code, height=380)
+    # ボタン等の高さを考慮して height を 430 に拡張
+    components.html(html_code, height=430)
+
 
 # --- 4. 採点 & 解答履歴保存処理 (部分点対応) ---
 def save_quiz_results(user_id, user_answers):
