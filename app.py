@@ -4,11 +4,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 from collections import defaultdict
 import json
+import urllib.parse
 from database import supabase
 
 st.set_page_config(page_title="マルチ検定ラボ", page_icon="🎓", layout="centered")
 
-# 1. セッション状態の初期化
+# --- 1. セッション状態の初期化 ---
 if "user" not in st.session_state:
     st.session_state.user = None
 if "current_exam" not in st.session_state:
@@ -24,7 +25,7 @@ if "user_answers" not in st.session_state:
 if "quiz_saved" not in st.session_state:
     st.session_state.quiz_saved = False
 
-# --- 認証関数 ---
+# --- 2. 認証関数 ---
 def login(email, password):
     try:
         response = supabase.auth.sign_in_with_password({"email": email, "password": password})
@@ -51,22 +52,85 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# --- 動画マスキング描画関数 ---
+# --- 3. 動画区間ループ・マスキング描画処理 ---
+def time_to_seconds(t_str):
+    if not t_str: return None
+    try:
+        parts = list(map(int, t_str.split(':')))
+        if len(parts) == 3:
+            return parts[0]*3600 + parts[1]*60 + parts[2]
+        elif len(parts) == 2:
+            return parts[0]*60 + parts[1]
+        elif len(parts) == 1:
+            return parts[0]
+    except:
+        return None
+    return None
+
 def render_masked_video(video_url: str):
+    parsed = urllib.parse.urlparse(video_url)
+    video_id = parsed.path.split('/')[-1]
+    qs = urllib.parse.parse_qs(parsed.query)
+    
+    start_sec = time_to_seconds(qs.get('start_time', [''])[0]) if 'start_time' in qs else None
+    end_sec = time_to_seconds(qs.get('end_time', [''])[0]) if 'end_time' in qs else None
+    loop_count = int(qs.get('loops', ['3'])[0])
+    
+    start_param = f"'start': {start_sec}," if start_sec is not None else ""
+    end_param = f"'end': {end_sec}," if end_sec is not None else ""
+    start_val = start_sec if start_sec is not None else 0
+
     html_code = f"""
     <div style="position: relative; width: 100%; max-width: 640px; margin: 0 auto; aspect-ratio: 16/9; overflow: hidden; border-radius: 8px;">
-        <iframe 
-            src="{video_url}?autoplay=0&controls=1&modestbranding=1" 
-            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none;"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-            allowfullscreen>
-        </iframe>
+        <div id="ytplayer" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></div>
+        <!-- 15% 黒枠マスキング -->
         <div style="position: absolute; bottom: 0; left: 0; width: 100%; height: 15%; background-color: #000000; pointer-events: none;"></div>
     </div>
+
+    <script>
+      var tag = document.createElement('script');
+      tag.src = "https://www.youtube.com/iframe_api";
+      var firstScriptTag = document.getElementsByTagName('script')[0];
+      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+      var player;
+      var playCount = 0;
+      var maxPlays = {loop_count};
+      var startSeconds = {start_val};
+
+      function onYouTubeIframeAPIReady() {{
+        player = new YT.Player('ytplayer', {{
+          videoId: '{video_id}',
+          playerVars: {{
+            'autoplay': 0, 
+            'controls': 1,
+            'modestbranding': 1,
+            'rel': 0,
+            'playsinline': 1,
+            {start_param}
+            {end_param}
+          }},
+          events: {{
+            'onStateChange': onPlayerStateChange
+          }}
+        }});
+      }}
+
+      function onPlayerStateChange(event) {{
+        // 動画終了時 (0) にループさせる
+        if (event.data === 0) {{
+          playCount++;
+          if (playCount < maxPlays) {{
+            player.seekTo(startSeconds);
+            player.playVideo();
+          }}
+        }}
+      }}
+    </script>
     """
     components.html(html_code, height=380)
 
-# --- 採点 & 解答履歴保存処理 ---
+# --- 4. 採点 & 解答履歴保存処理 (部分点対応) ---
 def save_quiz_results(user_id, user_answers):
     history_records = []
     correct_count = 0
@@ -81,7 +145,6 @@ def save_quiz_results(user_id, user_answers):
             
             detailed = {}
             all_correct = True
-            # ア・イ・ウ・エ ごとの正誤を個別に判定
             for key, correct_val in target_correct.items():
                 user_val = ans["user_answer"].get(key)
                 is_key_correct = (user_val == correct_val)
@@ -91,7 +154,7 @@ def save_quiz_results(user_id, user_answers):
             
             is_correct = all_correct
             detailed_result = detailed
-            ans["detailed_result"] = detailed # 結果表示画面用にセッションにも保持
+            ans["detailed_result"] = detailed
         else:
             is_correct = (str(ans["user_answer"]).strip().lower() == str(ans["correct_answer"]).strip().lower())
             
@@ -103,7 +166,7 @@ def save_quiz_results(user_id, user_answers):
             "user_id": user_id,
             "question_id": ans["question_id"],
             "is_correct": is_correct,
-            "detailed_result": detailed_result # データベースに部分点を保存
+            "detailed_result": detailed_result
         })
     
     if history_records:
@@ -111,7 +174,7 @@ def save_quiz_results(user_id, user_answers):
         
     return correct_count
 
-# --- 弱点分析データの取得・グラフ描画処理 ---
+# --- 5. 弱点分析データ集計・グラフ描画処理 ---
 def render_analytics_report(user_id):
     exams_res = supabase.table("exams").select("id, name").execute()
     exams = exams_res.data
@@ -127,7 +190,6 @@ def render_analytics_report(user_id):
     selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()))
     selected_exam_id = exam_options[selected_exam_name]
 
-    # ★ detailed_result（部分点）も一緒に取得する
     res = supabase.table("answer_history").select("is_correct, detailed_result, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     
@@ -162,7 +224,6 @@ def render_analytics_report(user_id):
     total_items = 0
     correct_items = 0
 
-    # フィルタリングされたデータで集計
     for record in filtered_data:
         q = record.get("questions")
         is_correct = record["is_correct"]
@@ -171,7 +232,7 @@ def render_analytics_report(user_id):
         fmt = fmt_map.get(q.get("format_type"), q.get("format_type", "その他"))
         
         if detailed:
-            # ★ 複数穴埋めの場合は、空欄ごとに部分点を集計（ア・イ・ウ・エそれぞれが分析対象になる）
+            # 複数穴埋め問題の部分点集計
             for key, key_is_correct in detailed.items():
                 cat_stats[category]["total"] += 1
                 fmt_stats[fmt]["total"] += 1
@@ -181,7 +242,6 @@ def render_analytics_report(user_id):
                     fmt_stats[fmt]["correct"] += 1
                     correct_items += 1
         else:
-            # 通常の問題
             cat_stats[category]["total"] += 1
             fmt_stats[fmt]["total"] += 1
             total_items += 1
@@ -199,7 +259,7 @@ def render_analytics_report(user_id):
     
     st.divider()
 
-    # 1. 知識分野別分析
+    # 知識分野別分析グラフ
     st.write("### 🎯 知識分野別の正答率")
     categories = list(cat_stats.keys())
     cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) for c in categories]
@@ -224,7 +284,7 @@ def render_analytics_report(user_id):
         )
         st.plotly_chart(fig_radar, use_container_width=True)
 
-    # 2. 出題形式別分析
+    # 出題形式別分析グラフ
     st.write("### 📝 出題形式別の正答率")
     formats = list(fmt_stats.keys())
     fmt_accuracies = [int((fmt_stats[f]["correct"] / fmt_stats[f]["total"]) * 100) for f in formats]
@@ -244,10 +304,9 @@ def render_analytics_report(user_id):
         st.plotly_chart(fig_bar, use_container_width=True)
 
 
-# --- 画面UI ---
+# --- 6. 画面UI (メインループ) ---
 st.title("🎓 マルチ検定ラボ")
 
-# 2. ログインしていない場合の画面
 if st.session_state.user is None:
     st.write("### アカウントにログイン")
     
@@ -269,7 +328,6 @@ if st.session_state.user is None:
             else:
                 sign_up(signup_email, signup_password, signup_username)
 
-# 3. ログインしている場合の画面
 else:
     # --- A. クイズ開始前（メインダッシュボード） ---
     if not st.session_state.quiz_started:
@@ -324,6 +382,7 @@ else:
         q_idx = st.session_state.current_q_idx
         total_q = len(questions)
         
+        # 全問終了時
         if q_idx >= total_q:
             if not st.session_state.quiz_saved:
                 st.session_state.correct_count = save_quiz_results(
@@ -337,7 +396,7 @@ else:
             st.write("### 🔍 解答一覧と正誤結果")
             
             for idx, ans in enumerate(st.session_state.user_answers):
-                # ★ 結果アイコンの判定（部分正解に対応）
+                # 複数穴埋め等の部分正解アイコン判定
                 if "detailed_result" in ans and ans["detailed_result"]:
                     correct_keys = sum(1 for v in ans["detailed_result"].values() if v)
                     total_keys = len(ans["detailed_result"])
@@ -351,7 +410,6 @@ else:
                     status_icon = "✅ 正解" if ans["is_correct"] else "❌ 不正解"
 
                 with st.expander(f"第 {idx+1} 問 ({ans['knowledge_category']}) - {status_icon}"):
-                    # ★ 複数穴埋めの場合は、ア・イ・ウ・エごとの正誤リストを表示
                     if ans["format_type"] == "multi-dropdown":
                         target_correct = ans["correct_answer"]
                         if isinstance(target_correct, str):
@@ -374,6 +432,7 @@ else:
                 st.session_state.quiz_saved = False
                 st.rerun()
         
+        # 出題中
         else:
             q = questions[q_idx]
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
