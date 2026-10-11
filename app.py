@@ -121,7 +121,7 @@ def render_masked_video(video_url: str):
         <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: transparent; z-index: 10;"></div>
         
         <!-- ★ 15% 黒枠マスキング（画面上部） -->
-        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 15%; background-color: #000000; pointer-events: none; z-index: 20;"></div>
+        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 40%; background-color: #000000; pointer-events: none; z-index: 20;"></div>
     </div>
 
     <!-- 専用の再生ボタン -->
