@@ -53,7 +53,7 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# --- 3. 動画マスキング (上部枠) & 操作不可・区間ループ描画関数 ---
+# --- 3. 動画マスキング (上部40px) & 操作不可・区間ループ描画関数 ---
 def time_to_seconds(t_str):
     if not t_str: return None
     try:
@@ -120,8 +120,8 @@ def render_masked_video(video_url: str):
         <!-- 透明な保護カバー（画面全域クリック遮断） -->
         <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: transparent; z-index: 10;"></div>
         
-        <!-- ★ 15% 黒枠マスキング（画面上部） -->
-        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 40%; background-color: #000000; pointer-events: none; z-index: 20;"></div>
+        <!-- 40px 黒枠マスキング（画面上部） -->
+        <div style="position: absolute; top: 0; left: 0; width: 100%; height: 40px; background-color: #000000; pointer-events: none; z-index: 20;"></div>
     </div>
 
     <!-- 専用の再生ボタン -->
@@ -251,6 +251,7 @@ def render_analytics_report(user_id):
     selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()))
     selected_exam_id = exam_options[selected_exam_name]
 
+    # 画像に関する列（image_url）が追加された想定でのデータ取得
     res = supabase.table("answer_history").select("is_correct, detailed_result, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     
@@ -273,11 +274,14 @@ def render_analytics_report(user_id):
     cat_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     fmt_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     
+    # ★ 新しい画像形式に対応したラベル
     fmt_map = {
         "4-choice": "4択問題",
         "text-input": "穴埋め記述",
         "video-4-choice": "動画付き4択",
         "video-text-input": "動画付き穴埋め",
+        "image-4-choice": "画像付き4択",
+        "image-text-input": "画像付き穴埋め",
         "multi-dropdown": "複数穴埋め"
     }
 
@@ -492,11 +496,18 @@ else:
             st.progress((q_idx + 1) / total_q)
             st.subheader(f"Q. {q['content']}")
             
+            # 動画の表示
             if q["format_type"] in ["video-4-choice", "video-text-input"] and q.get("video_url"):
                 render_masked_video(q["video_url"])
             
+            # ★新規追加：画像の表示
+            if q["format_type"] in ["image-4-choice", "image-text-input"] and q.get("image_url"):
+                st.image(q["image_url"], use_container_width=True)
+            
             user_input = None
-            if q["format_type"] in ["4-choice", "video-4-choice"]:
+            
+            # ★修正："image-4-choice" を追加
+            if q["format_type"] in ["4-choice", "video-4-choice", "image-4-choice"]:
                 choices = q["choices"] if isinstance(q["choices"], list) else []
                 user_input = st.radio("回答を選択してください:", choices, key=f"q_{q_idx}")
                 
