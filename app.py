@@ -35,43 +35,71 @@ if "is_interrupted" not in st.session_state:
 if "q_start_time" not in st.session_state:
     st.session_state.q_start_time = None
 
-# --- 2. スクロール制御関数 ---
+# --- 2. 確実・高精度スクロール制御関数 ---
 def scroll_to_top():
+    unique_key = f"top_{int(time.time() * 1000)}"
     components.html(
-        """
+        f"""
         <script>
-            try {
-                const target = window.parent.document.querySelector('section.main') 
-                            || window.parent.document.querySelector('[data-testid="stAppViewContainer"]')
-                            || window.parent;
-                if (target) {
-                    target.scrollTo({top: 0, left: 0, behavior: 'instant'});
-                }
-            } catch (e) {
-                try { window.parent.scrollTo(0, 0); } catch (err) {}
-            }
+            (function() {{
+                let count = 0;
+                const timer = setInterval(() => {{
+                    count++;
+                    try {{
+                        const doc = window.parent.document;
+                        if (doc) {{
+                            const scroller = doc.querySelector('section.main') 
+                                          || doc.querySelector('[data-testid="stAppViewContainer"]')
+                                          || doc.querySelector('.main');
+                            if (scroller) {{
+                                scroller.scrollTop = 0;
+                            }} else {{
+                                window.parent.scrollTo(0, 0);
+                            }}
+                        }}
+                    }} catch (e) {{}}
+                    if (count >= 8) clearInterval(timer);
+                }}, 60);
+            }})();
         </script>
         """,
         height=0,
         width=0,
+        key=f"comp_{unique_key}"
     )
 
-def scroll_to_question():
+def scroll_to_question(q_idx):
+    unique_key = f"q_{q_idx}_{int(time.time() * 1000)}"
     components.html(
-        """
+        f"""
         <script>
-            setTimeout(() => {
-                try {
-                    const anchor = window.parent.document.getElementById('question-top');
-                    if (anchor) {
-                        anchor.scrollIntoView({behavior: 'instant', block: 'start'});
-                    }
-                } catch (e) {}
-            }, 60);
+            (function() {{
+                let count = 0;
+                const timer = setInterval(() => {{
+                    count++;
+                    try {{
+                        const doc = window.parent.document;
+                        if (doc) {{
+                            const target = doc.getElementById('question-top') 
+                                        || doc.querySelector('h3') 
+                                        || doc.querySelector('[data-testid="stHeadingWithActionElements"]');
+                            if (target) {{
+                                target.scrollIntoView({{ behavior: 'auto', block: 'start' }});
+                            }} else {{
+                                const scroller = doc.querySelector('section.main') 
+                                              || doc.querySelector('[data-testid="stAppViewContainer"]');
+                                if (scroller) scroller.scrollTop = 0;
+                            }}
+                        }}
+                    }} catch (e) {{}}
+                    if (count >= 10) clearInterval(timer);
+                }}, 80);
+            }})();
         </script>
         """,
         height=0,
         width=0,
+        key=f"comp_{unique_key}"
     )
 
 # --- 3. 認証・データロード関数 ---
@@ -631,16 +659,20 @@ else:
         
         # --- 出題中画面 ---
         else:
-            # 問題文の1行目へジャストフィットさせるためのアンカーとスクロール呼出
-            st.markdown('<div id="question-top" style="scroll-margin-top: 55px;"></div>', unsafe_allow_html=True)
-            scroll_to_question()
+            # ページ遷移時に最新のq_idxキー付きでスクロールを発火
+            scroll_to_question(q_idx)
 
             if st.session_state.q_start_time is None:
                 st.session_state.q_start_time = time.time()
 
             q = questions[q_idx]
+            
+            # 問題の進行状況
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
             st.progress((q_idx + 1) / total_q)
+            
+            # ★ ここにヘッダー余白付きアンカーを配置（問題文の1行目がヘッダー直下に来る）
+            st.markdown('<div id="question-top" style="scroll-margin-top: 70px; display: block; height: 1px;"></div>', unsafe_allow_html=True)
             
             col_q, col_bm = st.columns([4, 1])
             with col_q:
