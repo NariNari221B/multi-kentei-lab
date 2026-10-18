@@ -404,6 +404,8 @@ else:
         target_exam_id = profile_data.get("target_exam_id")
         target_exam_date_str = profile_data.get("target_exam_date")
         
+        # 残り日数の計算
+        days_left = None
         if target_exam_date_str and target_exam_id in exam_id_to_name:
             target_date = datetime.strptime(target_exam_date_str, "%Y-%m-%d").date()
             days_left = (target_date - date.today()).days
@@ -461,12 +463,38 @@ else:
                 
                 st.info(f"**詳細:** {selected_exam['description']}")
                 
-                # ★ 新機能：出題モードの選択
-                study_mode = st.radio(
-                    "出題モード",
-                    ["📘 通常受験（すべての問題から出題）", "🔥 弱点特訓（過去に間違えた問題・未解答のみ）"],
-                    horizontal=True
+                # ★ 学習メソッド（出題モード）の定義とおすすめ判定
+                base_modes = [
+                    "📘 【単元集中】分野別基礎固め（分野順に出題）",
+                    "🔀 【交差出題】全範囲シャッフル演習（ランダム出題）",
+                    "🔥 【弱点特訓】ミス問・未解答集中（実戦演習）",
+                    "⚡ 【高速復習】正解済み問題の総点検（直前メンテナンス）"
+                ]
+                
+                recommend_idx = 0
+                if days_left is not None:
+                    if days_left >= 60:
+                        recommend_idx = 0  # 3〜2ヶ月前：概念理解・ブロック学習
+                    elif 21 <= days_left <= 59:
+                        recommend_idx = 1  # 1ヶ月〜3週間前：インターリービング
+                    elif 7 <= days_left <= 20:
+                        recommend_idx = 2  # 2週間〜1週間前：弱点特化
+                    else:
+                        recommend_idx = 3  # 6日以下：高速メンテナンス
+                
+                display_modes = []
+                for i, mode in enumerate(base_modes):
+                    if days_left is not None and i == recommend_idx:
+                        display_modes.append(f"{mode} 🌟今のおすすめ！")
+                    else:
+                        display_modes.append(mode)
+
+                selected_display_mode = st.selectbox(
+                    "学習メソッド（出題モード）を選択してください", 
+                    options=display_modes, 
+                    index=recommend_idx if days_left is not None else 0
                 )
+                selected_mode_idx = display_modes.index(selected_display_mode)
                 
                 if st.button("この条件でスタート！", type="primary"):
                     q_res = supabase.table("questions").select("*").eq("exam_id", selected_exam["id"]).execute()
@@ -475,23 +503,36 @@ else:
                     if not all_questions:
                         st.error("この検定にはまだ問題が登録されていません。")
                     else:
-                        target_questions = all_questions
+                        target_questions = all_questions.copy()
                         
-                        # ★ 弱点特訓モードのロジック
-                        if "弱点特訓" in study_mode:
-                            # 過去に1度でも「正解（True）」したことがある問題IDを取得
+                        # ★ 選択されたモードに応じた出題ロジック
+                        if selected_mode_idx == 0:
+                            # 【単元集中】カテゴリ順に並べ替え（シャッフルしない）
+                            target_questions = sorted(target_questions, key=lambda q: (q.get("knowledge_category", ""), q.get("id", 0)))
+                            
+                        elif selected_mode_idx == 1:
+                            # 【交差出題】単純に全体をシャッフル
+                            random.shuffle(target_questions)
+                            
+                        elif selected_mode_idx == 2:
+                            # 【弱点特訓】過去に正解した問題を除外、残りをシャッフル
                             hist_res = supabase.table("answer_history").select("question_id").eq("user_id", st.session_state.user.id).eq("is_correct", True).execute()
                             correct_q_ids = set([h["question_id"] for h in hist_res.data])
-                            
-                            # 正解したことがない問題（不正解の履歴しかない or 未解答）だけを残す
-                            target_questions = [q for q in all_questions if q["id"] not in correct_q_ids]
-                            
+                            target_questions = [q for q in target_questions if q["id"] not in correct_q_ids]
                             if not target_questions:
-                                st.success("🎉 素晴らしい！この検定のすべての問題に正解済みです！「通常受験」で総復習をしましょう。")
-                                st.stop() # 処理を止めてユーザーにメッセージを見せる
-                        
-                        # ★ 出題順序のランダムシャッフル
-                        random.shuffle(target_questions)
+                                st.success("🎉 素晴らしい！この検定のすべての問題に正解済みです！別のモードで復習しましょう。")
+                                st.stop()
+                            random.shuffle(target_questions)
+                            
+                        elif selected_mode_idx == 3:
+                            # 【高速復習】過去に正解した問題のみを抽出、シャッフル
+                            hist_res = supabase.table("answer_history").select("question_id").eq("user_id", st.session_state.user.id).eq("is_correct", True).execute()
+                            correct_q_ids = set([h["question_id"] for h in hist_res.data])
+                            target_questions = [q for q in target_questions if q["id"] in correct_q_ids]
+                            if not target_questions:
+                                st.warning("⚠️ まだ正解済みの問題がありません。まずは他のモードで学習を進めましょう！")
+                                st.stop()
+                            random.shuffle(target_questions)
                         
                         st.session_state.current_exam = selected_exam
                         st.session_state.questions = target_questions
