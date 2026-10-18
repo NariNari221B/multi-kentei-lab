@@ -293,6 +293,10 @@ def save_quiz_results(user_id, user_answers):
             
         ans["is_correct"] = is_correct
         if is_correct: correct_count += 1
+        
+        # ユーザー回答の文字列化（辞書型はJSON文字列化）
+        user_ans_val = ans.get("user_answer")
+        user_ans_str = json.dumps(user_ans_val, ensure_ascii=False) if isinstance(user_ans_val, dict) else str(user_ans_val)
             
         history_records.append({
             "user_id": user_id,
@@ -300,7 +304,8 @@ def save_quiz_results(user_id, user_answers):
             "is_correct": is_correct,
             "detailed_result": detailed_result,
             "confidence": ans.get("confidence"),
-            "time_taken_seconds": ans.get("time_taken_seconds", 0)
+            "time_taken_seconds": ans.get("time_taken_seconds", 0),
+            "user_answer": user_ans_str
         })
     if history_records:
         supabase.table("answer_history").insert(history_records).execute()
@@ -401,8 +406,121 @@ def render_analytics_report(user_id, default_exam_id=None):
         fig_bar.update_layout(showlegend=False, coloraxis_showscale=False, margin=dict(t=30, b=20))
         st.plotly_chart(fig_bar, use_container_width=True)
 
+# --- 8. 過去の解答履歴・解説ビューア ---
+def render_history_viewer(user_id):
+    exams_res = supabase.table("exams").select("id, name").execute()
+    exams = exams_res.data or []
+    
+    exam_filter_opts = {"すべての検定": None}
+    for e in exams:
+        exam_filter_opts[e["name"]] = e["id"]
+        
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        sel_exam_name = st.selectbox("📚 対象の検定で絞り込み", options=list(exam_filter_opts.keys()), key="hist_view_exam")
+    with c2:
+        sel_status = st.selectbox("🎯 正誤で絞り込み", ["すべて", "❌ 不正解・要復習のみ", "✅ 正解のみ"], key="hist_view_status")
+        
+    target_exam_id = exam_filter_opts[sel_exam_name]
+    
+    # 履歴データを取得（最新100件）
+    res = supabase.table("answer_history").select(
+        "id, created_at, is_correct, detailed_result, confidence, time_taken_seconds, user_answer, question_id, questions(exam_id, content, choices, correct_answer, explanation, knowledge_category, format_type, video_url, image_url)"
+    ).eq("user_id", user_id).order("created_at", desc=True).limit(100).execute()
+    
+    records = res.data or []
+    if not records:
+        st.info("💡 まだ解答履歴がありません。検定を受験するとここに履歴が蓄積されます！")
+        return
 
-# --- 8. 画面UI (メインループ) ---
+    # フィルタリング処理
+    jst = timezone(timedelta(hours=9))
+    filtered_records = []
+    for r in records:
+        q = r.get("questions")
+        if not q:
+            continue
+        if target_exam_id is not None and q.get("exam_id") != target_exam_id:
+            continue
+        
+        is_ok = r.get("is_correct")
+        if sel_status == "❌ 不正解・要復習のみ" and is_ok:
+            continue
+        elif sel_status == "✅ 正解のみ" and not is_ok:
+            continue
+            
+        filtered_records.append(r)
+
+    st.caption(f"該当件数: {len(filtered_records)} 件（最新順）")
+
+    if not filtered_records:
+        st.warning("条件に一致する解答履歴が見つかりませんでした。")
+        return
+
+    for item in filtered_records:
+        q = item.get("questions")
+        qid = item["question_id"]
+        is_ok = item.get("is_correct")
+        status_label = "✅ 正解" if is_ok else "❌ 不正解"
+        
+        # JST日時の生成
+        created_str = item.get("created_at")
+        date_str = ""
+        if created_str:
+            try:
+                dt_utc = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                date_str = dt_utc.astimezone(jst).strftime("%Y/%m/%d %H:%M")
+            except Exception:
+                date_str = created_str[:16]
+
+        conf = item.get("confidence") or "未評価"
+        t_sec = item.get("time_taken_seconds") or 0
+        cat = q.get("knowledge_category", "分野未分類")
+        
+        header_text = f"{status_label} ｜ {date_str} ｜ {cat} ｜ [確信度: {conf}] [⏱️ {t_sec}秒]"
+        
+        with st.expander(header_text):
+            col_txt, col_bm = st.columns([5, 1])
+            with col_txt:
+                st.markdown(f"**Q. {q.get('content')}**")
+            with col_bm:
+                is_bm = qid in st.session_state.user_bookmarks
+                new_bm = st.checkbox("📌 保管", value=is_bm, key=f"hist_bm_{item['id']}")
+                if new_bm != is_bm:
+                    toggle_bookmark(user_id, qid, new_bm)
+
+            # 画像や動画があればプレビュー
+            if q.get("image_url"):
+                st.image(q.get("image_url"), use_container_width=True)
+            elif q.get("video_url"):
+                st.caption(f"🎥 動画リンク: {q.get('video_url')}")
+
+            st.write("---")
+            
+            # 回答と正解の表示
+            user_ans = item.get("user_answer")
+            detailed = item.get("detailed_result")
+            correct_ans = q.get("correct_answer")
+            
+            if q.get("format_type") == "multi-dropdown" and detailed:
+                target_correct = json.loads(correct_ans) if isinstance(correct_ans, str) else correct_ans
+                st.write("空欄ごとの結果:")
+                for k in target_correct.keys():
+                    icon = "✅" if detailed.get(k) else "❌"
+                    st.write(f"- （{k}） {icon} 正解: `{target_correct.get(k)}`")
+            else:
+                st.write(f"**あなたの回答:** `{user_ans if user_ans else '（記録なし）'}`")
+                st.write(f"**正解:** `{correct_ans}`")
+
+            # 解説表示
+            exp = q.get("explanation")
+            if exp:
+                st.info(f"💡 **解説:**\n\n{exp}")
+            else:
+                st.caption("※ この問題には解説が登録されていません。")
+
+
+# --- 9. 画面UI (メインループ) ---
 st.title("🎓 マルチ検定ラボ")
 
 if st.session_state.user is None:
@@ -487,7 +605,8 @@ else:
 
         st.divider()
 
-        main_tab1, main_tab2 = st.tabs(["📝 検定受験", "📊 弱点分析レポート"])
+        # ★ 3つのタブ構成に拡張
+        main_tab1, main_tab2, main_tab3 = st.tabs(["📝 検定受験", "📊 弱点分析レポート", "📖 解答履歴・解説"])
         
         with main_tab1:
             st.write("### 受験する検定とモードを選択")
@@ -597,7 +716,7 @@ else:
                         st.session_state.user_answers = []
                         st.session_state.quiz_saved = False
                         st.session_state.is_interrupted = False
-                        st.session_state.last_scrolled_q_idx = -1  # スクロール追跡をリセット
+                        st.session_state.last_scrolled_q_idx = -1
                         st.session_state.q_start_time = time.time()
                         st.session_state.quiz_started = True
                         st.rerun()
@@ -605,6 +724,10 @@ else:
         with main_tab2:
             st.write("### 累計解答データ分析")
             render_analytics_report(st.session_state.user.id)
+
+        with main_tab3:
+            st.write("### 過去の解答履歴・解説の確認")
+            render_history_viewer(st.session_state.user.id)
 
     else:
         questions = st.session_state.questions
@@ -614,7 +737,7 @@ else:
         # --- 全問終了 または 途中中断時 ---
         if q_idx >= total_q or st.session_state.is_interrupted:
             if not st.session_state.quiz_saved:
-                scroll_to_top()  # 結果画面への遷移時のみ最上部へ移動
+                scroll_to_top()
                 st.session_state.correct_count = save_quiz_results(st.session_state.user.id, st.session_state.user_answers)
                 update_streak_and_counts(st.session_state.user.id, len(st.session_state.user_answers))
                 st.session_state.quiz_saved = True
@@ -667,7 +790,6 @@ else:
         
         # --- 出題中画面 ---
         else:
-            # ★ 問題が切り替わった最初の1回だけスクロールを実行（スライダー等の操作時は実行しない）
             if st.session_state.last_scrolled_q_idx != q_idx:
                 scroll_to_question(q_idx)
                 st.session_state.last_scrolled_q_idx = q_idx
@@ -680,7 +802,6 @@ else:
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
             st.progress((q_idx + 1) / total_q)
             
-            # スクロール目標アンカー
             st.markdown('<div id="question-top" style="scroll-margin-top: 75px; height: 1px;"></div>', unsafe_allow_html=True)
             
             col_q, col_bm = st.columns([4, 1])
