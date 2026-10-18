@@ -6,6 +6,7 @@ from collections import defaultdict
 import json
 import urllib.parse
 import re
+import random
 from datetime import date, datetime
 from database import supabase
 
@@ -385,12 +386,10 @@ if st.session_state.user is None:
 
 else:
     if not st.session_state.quiz_started:
-        # プロフィール情報（目標検定・試験日を含む）を取得
         profile_res = supabase.table("profiles").select("username, target_exam_id, target_exam_date").eq("id", st.session_state.user.id).execute()
         profile_data = profile_res.data[0] if profile_res.data else {}
         username = profile_data.get("username", "ゲスト")
         
-        # 検定一覧を取得
         exams_res = supabase.table("exams").select("*").execute()
         exams = exams_res.data or []
         exam_id_to_name = {e["id"]: e["name"] for e in exams}
@@ -402,7 +401,6 @@ else:
             if st.button("ログアウト", use_container_width=True):
                 logout()
 
-        # --- 目標カウントダウン表示 ---
         target_exam_id = profile_data.get("target_exam_id")
         target_exam_date_str = profile_data.get("target_exam_date")
         
@@ -418,7 +416,6 @@ else:
             else:
                 st.warning(f"⚠️ **目標: {exam_name}** ｜ 設定された試験日（{target_date.strftime('%Y年%m月%d日')}）は終了しました。")
 
-        # --- 目標設定・変更フォーム ---
         with st.expander("📅 試験予定日の設定・変更"):
             if not exams:
                 st.caption("検定データが存在しません。")
@@ -454,7 +451,7 @@ else:
         main_tab1, main_tab2 = st.tabs(["📝 検定受験", "📊 弱点分析レポート"])
         
         with main_tab1:
-            st.write("### 受験する検定を選択")
+            st.write("### 受験する検定とモードを選択")
             if not exams:
                 st.warning("現在、受験可能な検定がありません。")
             else:
@@ -464,13 +461,40 @@ else:
                 
                 st.info(f"**詳細:** {selected_exam['description']}")
                 
-                if st.button("この検定を開始する", type="primary"):
+                # ★ 新機能：出題モードの選択
+                study_mode = st.radio(
+                    "出題モード",
+                    ["📘 通常受験（すべての問題から出題）", "🔥 弱点特訓（過去に間違えた問題・未解答のみ）"],
+                    horizontal=True
+                )
+                
+                if st.button("この条件でスタート！", type="primary"):
                     q_res = supabase.table("questions").select("*").eq("exam_id", selected_exam["id"]).execute()
-                    if not q_res.data:
+                    all_questions = q_res.data
+                    
+                    if not all_questions:
                         st.error("この検定にはまだ問題が登録されていません。")
                     else:
+                        target_questions = all_questions
+                        
+                        # ★ 弱点特訓モードのロジック
+                        if "弱点特訓" in study_mode:
+                            # 過去に1度でも「正解（True）」したことがある問題IDを取得
+                            hist_res = supabase.table("answer_history").select("question_id").eq("user_id", st.session_state.user.id).eq("is_correct", True).execute()
+                            correct_q_ids = set([h["question_id"] for h in hist_res.data])
+                            
+                            # 正解したことがない問題（不正解の履歴しかない or 未解答）だけを残す
+                            target_questions = [q for q in all_questions if q["id"] not in correct_q_ids]
+                            
+                            if not target_questions:
+                                st.success("🎉 素晴らしい！この検定のすべての問題に正解済みです！「通常受験」で総復習をしましょう。")
+                                st.stop() # 処理を止めてユーザーにメッセージを見せる
+                        
+                        # ★ 出題順序のランダムシャッフル
+                        random.shuffle(target_questions)
+                        
                         st.session_state.current_exam = selected_exam
-                        st.session_state.questions = q_res.data
+                        st.session_state.questions = target_questions
                         st.session_state.current_q_idx = 0
                         st.session_state.user_answers = []
                         st.session_state.quiz_saved = False
