@@ -6,6 +6,7 @@ from collections import defaultdict
 import json
 import urllib.parse
 import re
+from datetime import date, datetime
 from database import supabase
 
 st.set_page_config(page_title="マルチ検定ラボ", page_icon="🎓", layout="centered")
@@ -109,22 +110,16 @@ def render_masked_video(video_url: str):
 
     html_code = f"""
     <div style="position: relative; width: 100%; max-width: 640px; margin: 0 auto; aspect-ratio: 16/9; overflow: hidden; border-radius: 8px;">
-        <!-- YouTube iframe -->
         <iframe 
             id="ytplayer"
             src="{embed_src}"
             style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none;"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
         </iframe>
-        
-        <!-- 透明な保護カバー（画面全域クリック遮断） -->
         <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: transparent; z-index: 10;"></div>
-        
-        <!-- 40px 黒枠マスキング（画面上部） -->
         <div style="position: absolute; top: 0; left: 0; width: 100%; height: 40px; background-color: #000000; pointer-events: none; z-index: 20;"></div>
     </div>
 
-    <!-- 専用の再生ボタン -->
     <div style="text-align: center; margin-top: 12px;">
         <button id="play-btn" onclick="startVideo()" style="padding: 10px 24px; font-size: 15px; font-weight: bold; border-radius: 6px; background-color: #1E88E5; color: white; border: none; cursor: pointer; transition: 0.2s;">
             ▶ 動画を再生する（{loop_count}回自動再生）
@@ -251,7 +246,6 @@ def render_analytics_report(user_id):
     selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()))
     selected_exam_id = exam_options[selected_exam_name]
 
-    # 画像に関する列（image_url）が追加された想定でのデータ取得
     res = supabase.table("answer_history").select("is_correct, detailed_result, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     
@@ -274,7 +268,6 @@ def render_analytics_report(user_id):
     cat_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     fmt_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     
-    # ★ 新しい画像形式に対応したラベル
     fmt_map = {
         "4-choice": "4択問題",
         "text-input": "穴埋め記述",
@@ -392,25 +385,76 @@ if st.session_state.user is None:
 
 else:
     if not st.session_state.quiz_started:
-        profile_res = supabase.table("profiles").select("username").eq("id", st.session_state.user.id).execute()
-        username = profile_res.data[0]["username"] if profile_res.data else "ゲスト"
+        # プロフィール情報（目標検定・試験日を含む）を取得
+        profile_res = supabase.table("profiles").select("username, target_exam_id, target_exam_date").eq("id", st.session_state.user.id).execute()
+        profile_data = profile_res.data[0] if profile_res.data else {}
+        username = profile_data.get("username", "ゲスト")
         
+        # 検定一覧を取得
+        exams_res = supabase.table("exams").select("*").execute()
+        exams = exams_res.data or []
+        exam_id_to_name = {e["id"]: e["name"] for e in exams}
+
         col1, col2 = st.columns([3, 1])
         with col1:
             st.write(f"ようこそ、**{username}** さん！")
         with col2:
             if st.button("ログアウト", use_container_width=True):
                 logout()
+
+        # --- 目標カウントダウン表示 ---
+        target_exam_id = profile_data.get("target_exam_id")
+        target_exam_date_str = profile_data.get("target_exam_date")
         
+        if target_exam_date_str and target_exam_id in exam_id_to_name:
+            target_date = datetime.strptime(target_exam_date_str, "%Y-%m-%d").date()
+            days_left = (target_date - date.today()).days
+            exam_name = exam_id_to_name[target_exam_id]
+
+            if days_left > 0:
+                st.info(f"🎯 **目標: {exam_name}** ｜ 試験日: **{target_date.strftime('%Y年%m月%d日')}**（本番まであと **{days_left} 日**）")
+            elif days_left == 0:
+                st.success(f"🎉 **目標: {exam_name}** ｜ **本日が試験本番です！実力を発揮してきてください！**")
+            else:
+                st.warning(f"⚠️ **目標: {exam_name}** ｜ 設定された試験日（{target_date.strftime('%Y年%m月%d日')}）は終了しました。")
+
+        # --- 目標設定・変更フォーム ---
+        with st.expander("📅 試験予定日の設定・変更"):
+            if not exams:
+                st.caption("検定データが存在しません。")
+            else:
+                target_exam_map = {e["name"]: e["id"] for e in exams}
+                current_exam_idx = 0
+                if target_exam_id in exam_id_to_name:
+                    current_exam_name = exam_id_to_name[target_exam_id]
+                    if current_exam_name in target_exam_map:
+                        current_exam_idx = list(target_exam_map.keys()).index(current_exam_name)
+                
+                selected_t_exam_name = st.selectbox("目標とする検定", options=list(target_exam_map.keys()), index=current_exam_idx)
+                
+                default_date = date.today()
+                if target_exam_date_str:
+                    try:
+                        default_date = datetime.strptime(target_exam_date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        default_date = date.today()
+
+                selected_t_date = st.date_input("試験予定日", value=default_date, min_value=date.today())
+
+                if st.button("予定日を保存する", type="primary"):
+                    supabase.table("profiles").update({
+                        "target_exam_id": target_exam_map[selected_t_exam_name],
+                        "target_exam_date": str(selected_t_date)
+                    }).eq("id", st.session_state.user.id).execute()
+                    st.success("試験予定日を更新しました！")
+                    st.rerun()
+
         st.divider()
-        
+
         main_tab1, main_tab2 = st.tabs(["📝 検定受験", "📊 弱点分析レポート"])
         
         with main_tab1:
             st.write("### 受験する検定を選択")
-            exams_res = supabase.table("exams").select("*").execute()
-            exams = exams_res.data
-            
             if not exams:
                 st.warning("現在、受験可能な検定がありません。")
             else:
@@ -496,17 +540,13 @@ else:
             st.progress((q_idx + 1) / total_q)
             st.subheader(f"Q. {q['content']}")
             
-            # 動画の表示
             if q["format_type"] in ["video-4-choice", "video-text-input"] and q.get("video_url"):
                 render_masked_video(q["video_url"])
             
-            # ★新規追加：画像の表示
             if q["format_type"] in ["image-4-choice", "image-text-input"] and q.get("image_url"):
                 st.image(q["image_url"], use_container_width=True)
             
             user_input = None
-            
-            # ★修正："image-4-choice" を追加
             if q["format_type"] in ["4-choice", "video-4-choice", "image-4-choice"]:
                 choices = q["choices"] if isinstance(q["choices"], list) else []
                 user_input = st.radio("回答を選択してください:", choices, key=f"q_{q_idx}")
