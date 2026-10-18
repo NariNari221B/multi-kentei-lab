@@ -8,7 +8,7 @@ import urllib.parse
 import re
 import random
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from database import supabase
 
 st.set_page_config(page_title="マルチ検定ラボ", page_icon="🎓", layout="centered")
@@ -106,7 +106,42 @@ def update_streak_and_counts(user_id, solved_count):
             "today_count": today_count
         }).eq("id", user_id).execute()
 
-# --- 3. 動画マスキング関数 ---
+# --- 3. 過去7日間の学習履歴集計関数 ---
+def get_recent_7days_history(user_id, exam_id):
+    jst = timezone(timedelta(hours=9))
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    
+    res = supabase.table("answer_history").select(
+        "question_id, is_correct, confidence, created_at, questions(exam_id)"
+    ).eq("user_id", user_id).gte("created_at", seven_days_ago.isoformat()).execute()
+    
+    date_grouped = defaultdict(lambda: {"all_q_ids": set(), "review_q_ids": set()})
+    
+    for r in res.data:
+        q = r.get("questions")
+        if not q or q.get("exam_id") != exam_id:
+            continue
+        
+        # JST日付に変換
+        created_str = r.get("created_at")
+        if not created_str:
+            continue
+        try:
+            dt_utc = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            dt_jst = dt_utc.astimezone(jst).date()
+        except Exception:
+            continue
+            
+        qid = r["question_id"]
+        date_grouped[dt_jst]["all_q_ids"].add(qid)
+        
+        # 不正解 または 「自信あり！」以外は復習対象とする
+        if not r.get("is_correct") or r.get("confidence") != "自信あり！":
+            date_grouped[dt_jst]["review_q_ids"].add(qid)
+            
+    return date_grouped
+
+# --- 4. 動画マスキング関数 ---
 def time_to_seconds(t_str):
     if not t_str: return None
     try:
@@ -161,7 +196,7 @@ def render_masked_video(video_url: str):
     """
     components.html(html_code, height=430)
 
-# --- 4. 採点 & 解答履歴保存処理 ---
+# --- 5. 採点 & 解答履歴保存処理 ---
 def save_quiz_results(user_id, user_answers):
     if not user_answers:
         return 0
@@ -200,7 +235,7 @@ def save_quiz_results(user_id, user_answers):
         supabase.table("answer_history").insert(history_records).execute()
     return correct_count
 
-# --- 5. 弱点分析・グラフ描画（解答時間分析統合版） ---
+# --- 6. 弱点分析・グラフ描画 ---
 def render_analytics_report(user_id, default_exam_id=None):
     exams_res = supabase.table("exams").select("id, name").execute()
     exams = exams_res.data
@@ -261,7 +296,6 @@ def render_analytics_report(user_id, default_exam_id=None):
     m4.metric("⏱️ 平均解答時間", f"{avg_time} 秒/問")
     st.divider()
 
-    # 1. 知識分野別正答率（レーダーチャート）
     st.write("### 🎯 知識分野別の正答率")
     categories = list(cat_stats.keys())
     cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) if cat_stats[c]["total"] > 0 else 0 for c in categories]
@@ -272,7 +306,6 @@ def render_analytics_report(user_id, default_exam_id=None):
         fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False, margin=dict(t=20, b=20, l=40, r=40))
         st.plotly_chart(fig_radar, use_container_width=True)
 
-    # 2. 正答率 × 解答時間のマトリクス（散布図）
     st.write("### ⏱️ 分野別：正答率と平均解答時間のバランス")
     st.caption("右上：安定（高正答率・素早い）｜ 左上：要スピード（高正答率だが時間過多）｜ 下：最重点克服（正答率が低い）")
     if categories:
@@ -288,7 +321,6 @@ def render_analytics_report(user_id, default_exam_id=None):
         fig_scatter.update_layout(margin=dict(t=20, b=20, l=20, r=20))
         st.plotly_chart(fig_scatter, use_container_width=True)
 
-    # 3. 出題形式別
     st.write("### 📝 出題形式別の正答率")
     formats = list(fmt_stats.keys())
     fmt_accuracies = [int((fmt_stats[f]["correct"] / fmt_stats[f]["total"]) * 100) if fmt_stats[f]["total"] > 0 else 0 for f in formats]
@@ -299,7 +331,7 @@ def render_analytics_report(user_id, default_exam_id=None):
         st.plotly_chart(fig_bar, use_container_width=True)
 
 
-# --- 6. 画面UI (メインループ) ---
+# --- 7. 画面UI (メインループ) ---
 st.title("🎓 マルチ検定ラボ")
 
 if st.session_state.user is None:
@@ -395,12 +427,16 @@ else:
                 selected_exam_name = st.selectbox("検定一覧", options=list(exam_options.keys()))
                 selected_exam = exam_options[selected_exam_name]
                 
+                # ★ 過去7日間の学習日を取得
+                recent_history = get_recent_7days_history(st.session_state.user.id, selected_exam["id"])
+                
                 base_modes = [
                     "📘 【単元集中】分野別基礎固め",
                     "🔀 【交差出題】全範囲シャッフル演習",
                     "🔥 【弱点特訓】ミス問・自信なし・時間過多（要克服）",
                     "⚡ 【高速復習】完全に理解している問題の総点検",
-                    "🔖 【直前対策】ブックマークした問題だけを解く"
+                    "🔖 【直前対策】ブックマークした問題だけを解く",
+                    "📅 【日付指定復習】過去7日間の学習履歴から復習"
                 ]
                 recommend_idx = 0
                 if days_left is not None:
@@ -413,6 +449,28 @@ else:
                 selected_display_mode = st.selectbox("学習メソッド（出題モード）を選択してください", options=display_modes, index=recommend_idx if days_left is not None else 0)
                 selected_mode_idx = display_modes.index(selected_display_mode)
                 
+                # 日付指定復習が選択された場合のオプションUI
+                selected_review_date = None
+                only_review_mistakes = False
+                
+                if selected_mode_idx == 5:
+                    if not recent_history:
+                        st.info("💡 過去7日間にこの検定を解いた履歴がまだありません。まずは他のモードで解いてみましょう！")
+                    else:
+                        st.write("#### 📆 復習する日付を選択してください")
+                        date_options = {}
+                        # 日付の降順（新しい順）で並べ替え
+                        for d in sorted(recent_history.keys(), reverse=True):
+                            total_q = len(recent_history[d]["all_q_ids"])
+                            rev_q = len(recent_history[d]["review_q_ids"])
+                            label = f"{d.strftime('%Y/%m/%d (%a)')} ｜ 全{total_q}問中、要復習{rev_q}問"
+                            date_options[label] = d
+                        
+                        selected_label = st.selectbox("学習実績日", options=list(date_options.keys()))
+                        selected_review_date = date_options[selected_label]
+                        
+                        only_review_mistakes = st.checkbox("❌ 間違えた問題・自信がなかった問題のみを出題する", value=True)
+
                 if st.button("この条件でスタート！", type="primary"):
                     q_res = supabase.table("questions").select("*").eq("exam_id", selected_exam["id"]).execute()
                     all_questions = q_res.data
@@ -427,25 +485,21 @@ else:
                         elif selected_mode_idx == 1:
                             random.shuffle(target_questions)
                         elif selected_mode_idx in [2, 3]:
-                            # 解答履歴（正解、自信あり、45秒以内の「完全定着」問題を判定）
                             hist_res = supabase.table("answer_history").select("question_id, is_correct, confidence, time_taken_seconds").eq("user_id", st.session_state.user.id).execute()
-                            
                             perfect_q_ids = set()
                             for h in hist_res.data:
                                 is_ok = h.get("is_correct")
                                 conf_ok = (h.get("confidence") == "自信あり！")
-                                time_ok = (h.get("time_taken_seconds") is None or h.get("time_taken_seconds") <= 45) # 45秒以内
+                                time_ok = (h.get("time_taken_seconds") is None or h.get("time_taken_seconds") <= 45)
                                 if is_ok and conf_ok and time_ok:
                                     perfect_q_ids.add(h["question_id"])
                             
                             if selected_mode_idx == 2:
-                                # 弱点特訓：完全定着以外の問題（間違えた、勘で解いた、時間がかかりすぎた）
                                 target_questions = [q for q in target_questions if q["id"] not in perfect_q_ids]
                                 if not target_questions:
                                     st.success("🎉 素晴らしい！すべての問題を素早く確実に理解しています！「高速復習」に挑戦しましょう。")
                                     st.stop()
                             else:
-                                # 高速復習：完全定着した問題のみ
                                 target_questions = [q for q in target_questions if q["id"] in perfect_q_ids]
                                 if not target_questions:
                                     st.warning("⚠️ まだ「素早く自信を持って正解した」問題がありません。まずは他のモードで学習しましょう！")
@@ -457,6 +511,19 @@ else:
                                 st.warning("⚠️ ブックマークされている問題がありません。出題画面の 📌 ボタンで追加できます。")
                                 st.stop()
                             random.shuffle(target_questions)
+                        elif selected_mode_idx == 5:
+                            # 日付指定復習の出題ロジック
+                            if not selected_review_date or selected_review_date not in recent_history:
+                                st.warning("⚠️ 復習対象の日付データが見つかりません。")
+                                st.stop()
+                                
+                            target_ids = recent_history[selected_review_date]["review_q_ids"] if only_review_mistakes else recent_history[selected_review_date]["all_q_ids"]
+                            target_questions = [q for q in target_questions if q["id"] in target_ids]
+                            
+                            if not target_questions:
+                                st.success("🎉 この日は全問「自信あり！」で完全正解しています！復習対象はありません。")
+                                st.stop()
+                            random.shuffle(target_questions)
                         
                         st.session_state.current_exam = selected_exam
                         st.session_state.questions = target_questions
@@ -464,7 +531,7 @@ else:
                         st.session_state.user_answers = []
                         st.session_state.quiz_saved = False
                         st.session_state.is_interrupted = False
-                        st.session_state.q_start_time = time.time()  # 計測開始
+                        st.session_state.q_start_time = time.time()
                         st.session_state.quiz_started = True
                         st.rerun()
 
@@ -594,7 +661,7 @@ else:
                             "time_taken_seconds": max(1, elapsed_seconds)
                         })
                         st.session_state.current_q_idx += 1
-                        st.session_state.q_start_time = time.time()  # 次の問題の開始時刻をリセット
+                        st.session_state.q_start_time = time.time()
                         st.rerun()
 
             with btn_col2:
