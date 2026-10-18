@@ -7,6 +7,7 @@ import json
 import urllib.parse
 import re
 import random
+import time
 from datetime import date, datetime, timedelta
 from database import supabase
 
@@ -31,6 +32,8 @@ if "user_bookmarks" not in st.session_state:
     st.session_state.user_bookmarks = set()
 if "is_interrupted" not in st.session_state:
     st.session_state.is_interrupted = False
+if "q_start_time" not in st.session_state:
+    st.session_state.q_start_time = None
 
 # --- 2. 認証・データロード関数 ---
 def login(email, password):
@@ -190,13 +193,14 @@ def save_quiz_results(user_id, user_answers):
             "question_id": ans["question_id"],
             "is_correct": is_correct,
             "detailed_result": detailed_result,
-            "confidence": ans.get("confidence")
+            "confidence": ans.get("confidence"),
+            "time_taken_seconds": ans.get("time_taken_seconds", 0)
         })
     if history_records:
         supabase.table("answer_history").insert(history_records).execute()
     return correct_count
 
-# --- 5. 弱点分析・グラフ描画 ---
+# --- 5. 弱点分析・グラフ描画（解答時間分析統合版） ---
 def render_analytics_report(user_id, default_exam_id=None):
     exams_res = supabase.table("exams").select("id, name").execute()
     exams = exams_res.data
@@ -205,7 +209,6 @@ def render_analytics_report(user_id, default_exam_id=None):
     exam_options = {"すべての検定 (総合)": None}
     for exam in exams: exam_options[exam["name"]] = exam["id"]
     
-    # デフォルトで特定の検定を選択状態にする
     default_index = 0
     if default_exam_id:
         for idx, (name, eid) in enumerate(exam_options.items()):
@@ -216,20 +219,30 @@ def render_analytics_report(user_id, default_exam_id=None):
     selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()), index=default_index, key="analytics_exam_selector")
     selected_exam_id = exam_options[selected_exam_name]
     
-    res = supabase.table("answer_history").select("is_correct, detailed_result, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
+    res = supabase.table("answer_history").select("is_correct, detailed_result, time_taken_seconds, confidence, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     if not history_data: return st.info("💡 まだ解答履歴データがありません。")
     filtered_data = [r for r in history_data if r.get("questions") and (selected_exam_id is None or r["questions"].get("exam_id") == selected_exam_id)]
     if not filtered_data: return st.warning(f"「{selected_exam_name}」の受験履歴がありません。")
 
-    cat_stats = defaultdict(lambda: {"total": 0, "correct": 0})
+    cat_stats = defaultdict(lambda: {"total": 0, "correct": 0, "total_seconds": 0})
     fmt_stats = defaultdict(lambda: {"total": 0, "correct": 0})
     fmt_map = {"4-choice": "4択問題", "text-input": "穴埋め記述", "video-4-choice": "動画付き4択", "video-text-input": "動画付き穴埋め", "image-4-choice": "画像付き4択", "image-text-input": "画像付き穴埋め", "multi-dropdown": "複数穴埋め"}
-    total_items, correct_items = 0, 0
+    
+    total_items, correct_items, total_time = 0, 0, 0
+    valid_time_count = 0
+
     for record in filtered_data:
         q = record.get("questions")
         is_correct, detailed = record["is_correct"], record.get("detailed_result")
+        t_sec = record.get("time_taken_seconds") or 0
+        if t_sec > 0:
+            total_time += t_sec
+            valid_time_count += 1
+
         category, fmt = q.get("knowledge_category", "未分類"), fmt_map.get(q.get("format_type"), q.get("format_type", "その他"))
+        cat_stats[category]["total_seconds"] += t_sec
+
         if detailed:
             for key, key_is_correct in detailed.items():
                 cat_stats[category]["total"] += 1; fmt_stats[fmt]["total"] += 1; total_items += 1
@@ -239,23 +252,46 @@ def render_analytics_report(user_id, default_exam_id=None):
             if is_correct: cat_stats[category]["correct"] += 1; fmt_stats[fmt]["correct"] += 1; correct_items += 1
 
     overall_accuracy = int((correct_items / total_items) * 100) if total_items > 0 else 0
-    m1, m2, m3 = st.columns(3)
+    avg_time = int(total_time / valid_time_count) if valid_time_count > 0 else 0
+
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("解答問題数", f"{len(filtered_data)} 問")
     m2.metric("実質正答数", f"{correct_items} / {total_items}")
     m3.metric("総合正答率", f"{overall_accuracy} %")
+    m4.metric("⏱️ 平均解答時間", f"{avg_time} 秒/問")
     st.divider()
 
+    # 1. 知識分野別正答率（レーダーチャート）
     st.write("### 🎯 知識分野別の正答率")
     categories = list(cat_stats.keys())
-    cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) for c in categories]
+    cat_accuracies = [int((cat_stats[c]["correct"] / cat_stats[c]["total"]) * 100) if cat_stats[c]["total"] > 0 else 0 for c in categories]
+    cat_avg_times = [int(cat_stats[c]["total_seconds"] / cat_stats[c]["total"]) if cat_stats[c]["total"] > 0 else 0 for c in categories]
+
     if categories:
         fig_radar = go.Figure(data=go.Scatterpolar(r=cat_accuracies + [cat_accuracies[0]], theta=categories + [categories[0]], fill='toself', line_color='#1E88E5'))
         fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False, margin=dict(t=20, b=20, l=40, r=40))
         st.plotly_chart(fig_radar, use_container_width=True)
 
+    # 2. 正答率 × 解答時間のマトリクス（散布図）
+    st.write("### ⏱️ 分野別：正答率と平均解答時間のバランス")
+    st.caption("右上：安定（高正答率・素早い）｜ 左上：要スピード（高正答率だが時間過多）｜ 下：最重点克服（正答率が低い）")
+    if categories:
+        fig_scatter = px.scatter(
+            x=cat_avg_times,
+            y=cat_accuracies,
+            text=categories,
+            labels={'x': '平均解答時間（秒）', 'y': '正答率（%）'},
+            range_y=[-5, 105]
+        )
+        fig_scatter.update_traces(textposition='top center', marker=dict(size=14, color='#1E88E5', line=dict(width=1, color='DarkSlateGrey')))
+        fig_scatter.add_hline(y=70, line_dash="dash", line_color="orange", annotation_text="合格ライン目安 (70%)")
+        fig_scatter.update_layout(margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    # 3. 出題形式別
     st.write("### 📝 出題形式別の正答率")
     formats = list(fmt_stats.keys())
-    fmt_accuracies = [int((fmt_stats[f]["correct"] / fmt_stats[f]["total"]) * 100) for f in formats]
+    fmt_accuracies = [int((fmt_stats[f]["correct"] / fmt_stats[f]["total"]) * 100) if fmt_stats[f]["total"] > 0 else 0 for f in formats]
     if formats:
         fig_bar = px.bar(x=formats, y=fmt_accuracies, labels={'x': '出題形式', 'y': '正答率 (%)'}, range_y=[0, 100], text=[f"{v}%" for v in fmt_accuracies], color=fmt_accuracies, color_continuous_scale="Blues")
         fig_bar.update_traces(textposition='outside')
@@ -288,7 +324,7 @@ else:
         profile_data = profile_res.data[0] if profile_res.data else {}
         username = profile_data.get("username", "ゲスト")
         
-        # --- 学習トラッカー表示 ---
+        # 学習トラッカー
         streak = profile_data.get("current_streak") or 0
         today_count = profile_data.get("today_count") or 0
         last_date_str = profile_data.get("last_study_date")
@@ -311,7 +347,7 @@ else:
         st.progress(progress)
         if progress >= 1.0: st.success("🌟 今日の目標を達成しました！素晴らしい継続力です！")
 
-        # --- 目標日数 ---
+        # 目標日数
         exams_res = supabase.table("exams").select("*").execute()
         exams = exams_res.data or []
         exam_id_to_name = {e["id"]: e["name"] for e in exams}
@@ -362,7 +398,7 @@ else:
                 base_modes = [
                     "📘 【単元集中】分野別基礎固め",
                     "🔀 【交差出題】全範囲シャッフル演習",
-                    "🔥 【弱点特訓】ミス問・自信なし・未解答",
+                    "🔥 【弱点特訓】ミス問・自信なし・時間過多（要克服）",
                     "⚡ 【高速復習】完全に理解している問題の総点検",
                     "🔖 【直前対策】ブックマークした問題だけを解く"
                 ]
@@ -391,18 +427,28 @@ else:
                         elif selected_mode_idx == 1:
                             random.shuffle(target_questions)
                         elif selected_mode_idx in [2, 3]:
-                            hist_res = supabase.table("answer_history").select("question_id, is_correct, confidence").eq("user_id", st.session_state.user.id).execute()
-                            perfect_q_ids = set([h["question_id"] for h in hist_res.data if h.get("is_correct") and h.get("confidence") == "自信あり！"])
+                            # 解答履歴（正解、自信あり、45秒以内の「完全定着」問題を判定）
+                            hist_res = supabase.table("answer_history").select("question_id, is_correct, confidence, time_taken_seconds").eq("user_id", st.session_state.user.id).execute()
+                            
+                            perfect_q_ids = set()
+                            for h in hist_res.data:
+                                is_ok = h.get("is_correct")
+                                conf_ok = (h.get("confidence") == "自信あり！")
+                                time_ok = (h.get("time_taken_seconds") is None or h.get("time_taken_seconds") <= 45) # 45秒以内
+                                if is_ok and conf_ok and time_ok:
+                                    perfect_q_ids.add(h["question_id"])
                             
                             if selected_mode_idx == 2:
+                                # 弱点特訓：完全定着以外の問題（間違えた、勘で解いた、時間がかかりすぎた）
                                 target_questions = [q for q in target_questions if q["id"] not in perfect_q_ids]
                                 if not target_questions:
-                                    st.success("🎉 素晴らしい！すべての問題を完全に理解しています！「高速復習」に挑戦しましょう。")
+                                    st.success("🎉 素晴らしい！すべての問題を素早く確実に理解しています！「高速復習」に挑戦しましょう。")
                                     st.stop()
                             else:
+                                # 高速復習：完全定着した問題のみ
                                 target_questions = [q for q in target_questions if q["id"] in perfect_q_ids]
                                 if not target_questions:
-                                    st.warning("⚠️ まだ「自信あり！」で正解した問題がありません。まずは他のモードで学習しましょう！")
+                                    st.warning("⚠️ まだ「素早く自信を持って正解した」問題がありません。まずは他のモードで学習しましょう！")
                                     st.stop()
                             random.shuffle(target_questions)
                         elif selected_mode_idx == 4:
@@ -418,6 +464,7 @@ else:
                         st.session_state.user_answers = []
                         st.session_state.quiz_saved = False
                         st.session_state.is_interrupted = False
+                        st.session_state.q_start_time = time.time()  # 計測開始
                         st.session_state.quiz_started = True
                         st.rerun()
 
@@ -430,7 +477,7 @@ else:
         q_idx = st.session_state.current_q_idx
         total_q = len(questions)
         
-        # --- 全問終了 または 途中中断時（結果・解説・即時分析画面） ---
+        # --- 全問終了 または 途中中断時 ---
         if q_idx >= total_q or st.session_state.is_interrupted:
             if not st.session_state.quiz_saved:
                 st.session_state.correct_count = save_quiz_results(st.session_state.user.id, st.session_state.user_answers)
@@ -444,7 +491,6 @@ else:
                 st.balloons()
                 st.success("🎉 お疲れ様でした！全問の解答が終了し、記録されました。")
             
-            # ダッシュボードに戻るボタン
             if st.button("🏠 ダッシュボードに戻る", type="primary", use_container_width=True):
                 st.session_state.quiz_started = False
                 st.session_state.current_exam = None
@@ -462,7 +508,8 @@ else:
                 else:
                     status_icon = "✅ 正解" if ans["is_correct"] else "❌ 不正解"
 
-                with st.expander(f"第 {idx+1} 問 ({ans['knowledge_category']}) - {status_icon} [確信度: {ans.get('confidence')}]"):
+                t_spent = ans.get("time_taken_seconds", 0)
+                with st.expander(f"第 {idx+1} 問 ({ans['knowledge_category']}) - {status_icon} [確信度: {ans.get('confidence')}] [⏱️ {t_spent}秒]"):
                     if ans["format_type"] == "multi-dropdown":
                         target_correct = json.loads(ans["correct_answer"]) if isinstance(ans["correct_answer"], str) else ans["correct_answer"]
                         for k in target_correct.keys():
@@ -479,12 +526,14 @@ else:
                         st.info(f"💡 **解説:**\n\n{explanation}")
             
             st.divider()
-            # ★ 今回の解答結果を含めた最新の弱点分析レポートをその場で展開
             st.write("### 📊 最新の弱点分析レポート（今解いた結果を反映済み）")
             render_analytics_report(st.session_state.user.id, default_exam_id=st.session_state.current_exam["id"] if st.session_state.current_exam else None)
         
         # --- 出題中画面 ---
         else:
+            if st.session_state.q_start_time is None:
+                st.session_state.q_start_time = time.time()
+
             q = questions[q_idx]
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
             st.progress((q_idx + 1) / total_q)
@@ -534,19 +583,21 @@ else:
                     if not user_input or (isinstance(user_input, str) and user_input.strip() == ""):
                         st.warning("回答を入力・選択してください。")
                     else:
+                        elapsed_seconds = int(time.time() - st.session_state.q_start_time)
                         st.session_state.user_answers.append({
                             "question_id": q["id"],
                             "knowledge_category": q["knowledge_category"],
                             "format_type": q["format_type"],
                             "user_answer": user_input,
                             "correct_answer": q["correct_answer"],
-                            "confidence": confidence
+                            "confidence": confidence,
+                            "time_taken_seconds": max(1, elapsed_seconds)
                         })
                         st.session_state.current_q_idx += 1
+                        st.session_state.q_start_time = time.time()  # 次の問題の開始時刻をリセット
                         st.rerun()
 
             with btn_col2:
-                # ★ 途中中断・分析ボタン
                 if st.button("⏹️ 中断して分析へ", use_container_width=True):
                     if len(st.session_state.user_answers) == 0:
                         st.info("まだ1問も回答していません。ダッシュボードに戻ります。")
