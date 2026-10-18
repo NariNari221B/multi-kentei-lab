@@ -29,6 +29,8 @@ if "quiz_saved" not in st.session_state:
     st.session_state.quiz_saved = False
 if "user_bookmarks" not in st.session_state:
     st.session_state.user_bookmarks = set()
+if "is_interrupted" not in st.session_state:
+    st.session_state.is_interrupted = False
 
 # --- 2. 認証・データロード関数 ---
 def login(email, password):
@@ -71,6 +73,8 @@ def toggle_bookmark(user_id, question_id, is_bookmarked):
         st.session_state.user_bookmarks.discard(question_id)
 
 def update_streak_and_counts(user_id, solved_count):
+    if solved_count <= 0:
+        return
     today = date.today()
     res = supabase.table("profiles").select("last_study_date, current_streak, today_count").eq("id", user_id).execute()
     if res.data:
@@ -156,6 +160,8 @@ def render_masked_video(video_url: str):
 
 # --- 4. 採点 & 解答履歴保存処理 ---
 def save_quiz_results(user_id, user_answers):
+    if not user_answers:
+        return 0
     history_records = []
     correct_count = 0
     for ans in user_answers:
@@ -184,22 +190,32 @@ def save_quiz_results(user_id, user_answers):
             "question_id": ans["question_id"],
             "is_correct": is_correct,
             "detailed_result": detailed_result,
-            "confidence": ans.get("confidence") # 確信度の保存
+            "confidence": ans.get("confidence")
         })
     if history_records:
         supabase.table("answer_history").insert(history_records).execute()
     return correct_count
 
 # --- 5. 弱点分析・グラフ描画 ---
-def render_analytics_report(user_id):
-    # 既存の分析ロジックと同一のため省略せずに記述
+def render_analytics_report(user_id, default_exam_id=None):
     exams_res = supabase.table("exams").select("id, name").execute()
     exams = exams_res.data
     if not exams: return st.info("検定データがありません。")
+    
     exam_options = {"すべての検定 (総合)": None}
     for exam in exams: exam_options[exam["name"]] = exam["id"]
-    selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()))
+    
+    # デフォルトで特定の検定を選択状態にする
+    default_index = 0
+    if default_exam_id:
+        for idx, (name, eid) in enumerate(exam_options.items()):
+            if eid == default_exam_id:
+                default_index = idx
+                break
+                
+    selected_exam_name = st.selectbox("📊 分析する対象を選択してください", options=list(exam_options.keys()), index=default_index, key="analytics_exam_selector")
     selected_exam_id = exam_options[selected_exam_name]
+    
     res = supabase.table("answer_history").select("is_correct, detailed_result, questions(exam_id, knowledge_category, format_type)").eq("user_id", user_id).execute()
     history_data = res.data
     if not history_data: return st.info("💡 まだ解答履歴データがありません。")
@@ -264,7 +280,6 @@ if st.session_state.user is None:
         if st.button("登録"): sign_up(signup_email, signup_password, signup_username)
 
 else:
-    # ログイン後、ブックマーク初期化
     if "user_bookmarks" not in st.session_state or not st.session_state.user_bookmarks:
         load_bookmarks(st.session_state.user.id)
 
@@ -281,7 +296,7 @@ else:
         
         if last_date_str:
             last_date = datetime.strptime(last_date_str, "%Y-%m-%d").date()
-            if last_date != date.today(): today_count = 0 # 日付が変わったら表示上は0
+            if last_date != date.today(): today_count = 0
             
         c1, c2 = st.columns([3, 1])
         with c1: st.write(f"ようこそ、**{username}** さん！")
@@ -371,22 +386,20 @@ else:
                     else:
                         target_questions = all_questions.copy()
                         
-                        # ★ モード別出題ロジック
                         if selected_mode_idx == 0:
                             target_questions = sorted(target_questions, key=lambda q: (q.get("knowledge_category", ""), q.get("id", 0)))
                         elif selected_mode_idx == 1:
                             random.shuffle(target_questions)
                         elif selected_mode_idx in [2, 3]:
-                            # 履歴から「正解」かつ「自信あり」の問題を抽出
                             hist_res = supabase.table("answer_history").select("question_id, is_correct, confidence").eq("user_id", st.session_state.user.id).execute()
                             perfect_q_ids = set([h["question_id"] for h in hist_res.data if h.get("is_correct") and h.get("confidence") == "自信あり！"])
                             
-                            if selected_mode_idx == 2: # 弱点特訓（パーフェクト以外）
+                            if selected_mode_idx == 2:
                                 target_questions = [q for q in target_questions if q["id"] not in perfect_q_ids]
                                 if not target_questions:
                                     st.success("🎉 素晴らしい！すべての問題を完全に理解しています！「高速復習」に挑戦しましょう。")
                                     st.stop()
-                            else: # 高速復習（パーフェクトのみ）
+                            else:
                                 target_questions = [q for q in target_questions if q["id"] in perfect_q_ids]
                                 if not target_questions:
                                     st.warning("⚠️ まだ「自信あり！」で正解した問題がありません。まずは他のモードで学習しましょう！")
@@ -404,6 +417,7 @@ else:
                         st.session_state.current_q_idx = 0
                         st.session_state.user_answers = []
                         st.session_state.quiz_saved = False
+                        st.session_state.is_interrupted = False
                         st.session_state.quiz_started = True
                         st.rerun()
 
@@ -416,17 +430,30 @@ else:
         q_idx = st.session_state.current_q_idx
         total_q = len(questions)
         
-        # --- 全問終了時（結果・解説画面） ---
-        if q_idx >= total_q:
+        # --- 全問終了 または 途中中断時（結果・解説・即時分析画面） ---
+        if q_idx >= total_q or st.session_state.is_interrupted:
             if not st.session_state.quiz_saved:
                 st.session_state.correct_count = save_quiz_results(st.session_state.user.id, st.session_state.user_answers)
                 update_streak_and_counts(st.session_state.user.id, len(st.session_state.user_answers))
                 st.session_state.quiz_saved = True
             
-            st.balloons()
-            st.success("🎉 お疲れ様でした！解答内容が記録されました。")
-            st.write("### 🔍 解答一覧と詳細解説")
+            answered_count = len(st.session_state.user_answers)
+            if st.session_state.is_interrupted:
+                st.warning(f"⏸️ **解答を中断しました。**（全 {total_q} 問中、解き終えた **{answered_count} 問** を記録しました）")
+            else:
+                st.balloons()
+                st.success("🎉 お疲れ様でした！全問の解答が終了し、記録されました。")
             
+            # ダッシュボードに戻るボタン
+            if st.button("🏠 ダッシュボードに戻る", type="primary", use_container_width=True):
+                st.session_state.quiz_started = False
+                st.session_state.current_exam = None
+                st.session_state.quiz_saved = False
+                st.session_state.is_interrupted = False
+                st.rerun()
+
+            st.write("")
+            st.write("### 🔍 今回の解答一覧と詳細解説")
             for idx, ans in enumerate(st.session_state.user_answers):
                 if "detailed_result" in ans and ans["detailed_result"]:
                     correct_keys = sum(1 for v in ans["detailed_result"].values() if v)
@@ -447,17 +474,14 @@ else:
                         st.write(f"**あなたの回答:** `{ans['user_answer']}`")
                         st.write(f"**正解:** `{ans['correct_answer']}`")
                     
-                    # ★ 解説の表示
                     explanation = next((q.get("explanation") for q in questions if q["id"] == ans["question_id"]), None)
                     if explanation:
                         st.info(f"💡 **解説:**\n\n{explanation}")
             
-            st.write("")
-            if st.button("ダッシュボードに戻る", type="primary"):
-                st.session_state.quiz_started = False
-                st.session_state.current_exam = None
-                st.session_state.quiz_saved = False
-                st.rerun()
+            st.divider()
+            # ★ 今回の解答結果を含めた最新の弱点分析レポートをその場で展開
+            st.write("### 📊 最新の弱点分析レポート（今解いた結果を反映済み）")
+            render_analytics_report(st.session_state.user.id, default_exam_id=st.session_state.current_exam["id"] if st.session_state.current_exam else None)
         
         # --- 出題中画面 ---
         else:
@@ -465,7 +489,6 @@ else:
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
             st.progress((q_idx + 1) / total_q)
             
-            # ★ ブックマーク機能付きのヘッダー
             col_q, col_bm = st.columns([4, 1])
             with col_q:
                 st.subheader(f"Q. {q['content']}")
@@ -496,7 +519,6 @@ else:
                 user_input = st.text_input("解答を入力してください:", key=f"q_{q_idx}")
             
             st.write("---")
-            # ★ 確信度の入力
             confidence = st.select_slider(
                 "🤔 この解答の自信は？", 
                 options=["自信なし（勘）", "たぶんこれ", "自信あり！"], 
@@ -505,17 +527,33 @@ else:
             )
             
             st.write("")
-            if st.button("回答を送信して次へ ➔", type="primary"):
-                if not user_input or (isinstance(user_input, str) and user_input.strip() == ""):
-                    st.warning("回答を入力・選択してください。")
-                else:
-                    st.session_state.user_answers.append({
-                        "question_id": q["id"],
-                        "knowledge_category": q["knowledge_category"],
-                        "format_type": q["format_type"],
-                        "user_answer": user_input,
-                        "correct_answer": q["correct_answer"],
-                        "confidence": confidence # 確信度を記録
-                    })
-                    st.session_state.current_q_idx += 1
-                    st.rerun()
+            btn_col1, btn_col2 = st.columns([2, 1])
+            
+            with btn_col1:
+                if st.button("回答を送信して次へ ➔", type="primary", use_container_width=True):
+                    if not user_input or (isinstance(user_input, str) and user_input.strip() == ""):
+                        st.warning("回答を入力・選択してください。")
+                    else:
+                        st.session_state.user_answers.append({
+                            "question_id": q["id"],
+                            "knowledge_category": q["knowledge_category"],
+                            "format_type": q["format_type"],
+                            "user_answer": user_input,
+                            "correct_answer": q["correct_answer"],
+                            "confidence": confidence
+                        })
+                        st.session_state.current_q_idx += 1
+                        st.rerun()
+
+            with btn_col2:
+                # ★ 途中中断・分析ボタン
+                if st.button("⏹️ 中断して分析へ", use_container_width=True):
+                    if len(st.session_state.user_answers) == 0:
+                        st.info("まだ1問も回答していません。ダッシュボードに戻ります。")
+                        st.session_state.quiz_started = False
+                        st.session_state.current_exam = None
+                        st.session_state.quiz_saved = False
+                        st.rerun()
+                    else:
+                        st.session_state.is_interrupted = True
+                        st.rerun()
