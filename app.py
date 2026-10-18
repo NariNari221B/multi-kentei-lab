@@ -35,13 +35,12 @@ if "is_interrupted" not in st.session_state:
 if "q_start_time" not in st.session_state:
     st.session_state.q_start_time = None
 
-# --- 2. ページ最上部への自動スクロール関数（スマホ対応） ---
+# --- 2. スクロール制御関数 ---
 def scroll_to_top():
     components.html(
         """
         <script>
             try {
-                // Streamlitのスクロールコンテナを探索して即時最上部へ移動
                 const target = window.parent.document.querySelector('section.main') 
                             || window.parent.document.querySelector('[data-testid="stAppViewContainer"]')
                             || window.parent;
@@ -49,10 +48,26 @@ def scroll_to_top():
                     target.scrollTo({top: 0, left: 0, behavior: 'instant'});
                 }
             } catch (e) {
-                try {
-                    window.parent.scrollTo(0, 0);
-                } catch (err) {}
+                try { window.parent.scrollTo(0, 0); } catch (err) {}
             }
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+def scroll_to_question():
+    components.html(
+        """
+        <script>
+            setTimeout(() => {
+                try {
+                    const anchor = window.parent.document.getElementById('question-top');
+                    if (anchor) {
+                        anchor.scrollIntoView({behavior: 'instant', block: 'start'});
+                    }
+                } catch (e) {}
+            }, 60);
         </script>
         """,
         height=0,
@@ -563,7 +578,7 @@ else:
         
         # --- 全問終了 または 途中中断時 ---
         if q_idx >= total_q or st.session_state.is_interrupted:
-            scroll_to_top()  # 結果画面表示時に最上部へ自動スクロール
+            scroll_to_top()
             if not st.session_state.quiz_saved:
                 st.session_state.correct_count = save_quiz_results(st.session_state.user.id, st.session_state.user_answers)
                 update_streak_and_counts(st.session_state.user.id, len(st.session_state.user_answers))
@@ -616,7 +631,10 @@ else:
         
         # --- 出題中画面 ---
         else:
-            scroll_to_top()  # 次の問題に遷移した瞬間に最上部へ自動スクロール
+            # 問題文の1行目へジャストフィットさせるためのアンカーとスクロール呼出
+            st.markdown('<div id="question-top" style="scroll-margin-top: 55px;"></div>', unsafe_allow_html=True)
+            scroll_to_question()
+
             if st.session_state.q_start_time is None:
                 st.session_state.q_start_time = time.time()
 
