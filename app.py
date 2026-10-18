@@ -35,7 +35,31 @@ if "is_interrupted" not in st.session_state:
 if "q_start_time" not in st.session_state:
     st.session_state.q_start_time = None
 
-# --- 2. 認証・データロード関数 ---
+# --- 2. ページ最上部への自動スクロール関数（スマホ対応） ---
+def scroll_to_top():
+    components.html(
+        """
+        <script>
+            try {
+                // Streamlitのスクロールコンテナを探索して即時最上部へ移動
+                const target = window.parent.document.querySelector('section.main') 
+                            || window.parent.document.querySelector('[data-testid="stAppViewContainer"]')
+                            || window.parent;
+                if (target) {
+                    target.scrollTo({top: 0, left: 0, behavior: 'instant'});
+                }
+            } catch (e) {
+                try {
+                    window.parent.scrollTo(0, 0);
+                } catch (err) {}
+            }
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+# --- 3. 認証・データロード関数 ---
 def login(email, password):
     try:
         response = supabase.auth.sign_in_with_password({"email": email, "password": password})
@@ -106,7 +130,7 @@ def update_streak_and_counts(user_id, solved_count):
             "today_count": today_count
         }).eq("id", user_id).execute()
 
-# --- 3. 過去7日間の学習履歴集計関数 ---
+# --- 4. 過去7日間の学習履歴集計関数 ---
 def get_recent_7days_history(user_id, exam_id):
     jst = timezone(timedelta(hours=9))
     seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
@@ -122,7 +146,6 @@ def get_recent_7days_history(user_id, exam_id):
         if not q or q.get("exam_id") != exam_id:
             continue
         
-        # JST日付に変換
         created_str = r.get("created_at")
         if not created_str:
             continue
@@ -135,13 +158,12 @@ def get_recent_7days_history(user_id, exam_id):
         qid = r["question_id"]
         date_grouped[dt_jst]["all_q_ids"].add(qid)
         
-        # 不正解 または 「自信あり！」以外は復習対象とする
         if not r.get("is_correct") or r.get("confidence") != "自信あり！":
             date_grouped[dt_jst]["review_q_ids"].add(qid)
             
     return date_grouped
 
-# --- 4. 動画マスキング関数 ---
+# --- 5. 動画マスキング関数 ---
 def time_to_seconds(t_str):
     if not t_str: return None
     try:
@@ -196,7 +218,7 @@ def render_masked_video(video_url: str):
     """
     components.html(html_code, height=430)
 
-# --- 5. 採点 & 解答履歴保存処理 ---
+# --- 6. 採点 & 解答履歴保存処理 ---
 def save_quiz_results(user_id, user_answers):
     if not user_answers:
         return 0
@@ -235,7 +257,7 @@ def save_quiz_results(user_id, user_answers):
         supabase.table("answer_history").insert(history_records).execute()
     return correct_count
 
-# --- 6. 弱点分析・グラフ描画 ---
+# --- 7. 弱点分析・グラフ描画 ---
 def render_analytics_report(user_id, default_exam_id=None):
     exams_res = supabase.table("exams").select("id, name").execute()
     exams = exams_res.data
@@ -331,7 +353,7 @@ def render_analytics_report(user_id, default_exam_id=None):
         st.plotly_chart(fig_bar, use_container_width=True)
 
 
-# --- 7. 画面UI (メインループ) ---
+# --- 8. 画面UI (メインループ) ---
 st.title("🎓 マルチ検定ラボ")
 
 if st.session_state.user is None:
@@ -427,7 +449,6 @@ else:
                 selected_exam_name = st.selectbox("検定一覧", options=list(exam_options.keys()))
                 selected_exam = exam_options[selected_exam_name]
                 
-                # ★ 過去7日間の学習日を取得
                 recent_history = get_recent_7days_history(st.session_state.user.id, selected_exam["id"])
                 
                 base_modes = [
@@ -449,7 +470,6 @@ else:
                 selected_display_mode = st.selectbox("学習メソッド（出題モード）を選択してください", options=display_modes, index=recommend_idx if days_left is not None else 0)
                 selected_mode_idx = display_modes.index(selected_display_mode)
                 
-                # 日付指定復習が選択された場合のオプションUI
                 selected_review_date = None
                 only_review_mistakes = False
                 
@@ -459,7 +479,6 @@ else:
                     else:
                         st.write("#### 📆 復習する日付を選択してください")
                         date_options = {}
-                        # 日付の降順（新しい順）で並べ替え
                         for d in sorted(recent_history.keys(), reverse=True):
                             total_q = len(recent_history[d]["all_q_ids"])
                             rev_q = len(recent_history[d]["review_q_ids"])
@@ -468,7 +487,6 @@ else:
                         
                         selected_label = st.selectbox("学習実績日", options=list(date_options.keys()))
                         selected_review_date = date_options[selected_label]
-                        
                         only_review_mistakes = st.checkbox("❌ 間違えた問題・自信がなかった問題のみを出題する", value=True)
 
                 if st.button("この条件でスタート！", type="primary"):
@@ -512,7 +530,6 @@ else:
                                 st.stop()
                             random.shuffle(target_questions)
                         elif selected_mode_idx == 5:
-                            # 日付指定復習の出題ロジック
                             if not selected_review_date or selected_review_date not in recent_history:
                                 st.warning("⚠️ 復習対象の日付データが見つかりません。")
                                 st.stop()
@@ -546,6 +563,7 @@ else:
         
         # --- 全問終了 または 途中中断時 ---
         if q_idx >= total_q or st.session_state.is_interrupted:
+            scroll_to_top()  # 結果画面表示時に最上部へ自動スクロール
             if not st.session_state.quiz_saved:
                 st.session_state.correct_count = save_quiz_results(st.session_state.user.id, st.session_state.user_answers)
                 update_streak_and_counts(st.session_state.user.id, len(st.session_state.user_answers))
@@ -598,6 +616,7 @@ else:
         
         # --- 出題中画面 ---
         else:
+            scroll_to_top()  # 次の問題に遷移した瞬間に最上部へ自動スクロール
             if st.session_state.q_start_time is None:
                 st.session_state.q_start_time = time.time()
 
