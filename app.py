@@ -37,69 +37,75 @@ if "q_start_time" not in st.session_state:
 
 # --- 2. 確実・高精度スクロール制御関数 ---
 def scroll_to_top():
-    unique_key = f"top_{int(time.time() * 1000)}"
+    ts = int(time.time() * 1000)
     components.html(
         f"""
+        <!-- {ts} -->
         <script>
             (function() {{
-                let count = 0;
-                const timer = setInterval(() => {{
-                    count++;
+                function toTop() {{
                     try {{
                         const doc = window.parent.document;
-                        if (doc) {{
-                            const scroller = doc.querySelector('section.main') 
-                                          || doc.querySelector('[data-testid="stAppViewContainer"]')
-                                          || doc.querySelector('.main');
-                            if (scroller) {{
-                                scroller.scrollTop = 0;
-                            }} else {{
-                                window.parent.scrollTo(0, 0);
-                            }}
+                        if (!doc) return;
+                        const scroller = doc.querySelector('section.main') 
+                                      || doc.querySelector('[data-testid="stAppViewContainer"]')
+                                      || doc.documentElement 
+                                      || doc.body;
+                        if (scroller) {{
+                            scroller.scrollTop = 0;
                         }}
+                        window.parent.scrollTo(0, 0);
                     }} catch (e) {{}}
-                    if (count >= 8) clearInterval(timer);
-                }}, 60);
+                }}
+                [30, 100, 250, 500].forEach(d => setTimeout(toTop, d));
             }})();
         </script>
         """,
         height=0,
-        width=0,
-        key=f"comp_{unique_key}"
+        width=0
     )
 
 def scroll_to_question(q_idx):
-    unique_key = f"q_{q_idx}_{int(time.time() * 1000)}"
+    ts = int(time.time() * 1000)
     components.html(
         f"""
+        <!-- q_{q_idx}_{ts} -->
         <script>
             (function() {{
-                let count = 0;
-                const timer = setInterval(() => {{
-                    count++;
+                function doScroll() {{
                     try {{
                         const doc = window.parent.document;
-                        if (doc) {{
-                            const target = doc.getElementById('question-top') 
-                                        || doc.querySelector('h3') 
-                                        || doc.querySelector('[data-testid="stHeadingWithActionElements"]');
-                            if (target) {{
-                                target.scrollIntoView({{ behavior: 'auto', block: 'start' }});
-                            }} else {{
-                                const scroller = doc.querySelector('section.main') 
-                                              || doc.querySelector('[data-testid="stAppViewContainer"]');
-                                if (scroller) scroller.scrollTop = 0;
-                            }}
+                        if (!doc) return;
+                        
+                        const target = doc.getElementById('question-top') 
+                                    || doc.querySelector('h3');
+                        const scroller = doc.querySelector('section.main') 
+                                      || doc.querySelector('[data-testid="stAppViewContainer"]') 
+                                      || doc.documentElement 
+                                      || doc.body;
+                                      
+                        if (target && scroller) {{
+                            const scrollerRect = scroller.getBoundingClientRect();
+                            const targetRect = target.getBoundingClientRect();
+                            const targetTop = targetRect.top - scrollerRect.top + scroller.scrollTop;
+                            
+                            // ヘッダー被りを防ぐため上部マージンを引いて設定
+                            scroller.scrollTop = Math.max(0, targetTop - 15);
+                            target.scrollIntoView({{ behavior: 'auto', block: 'start' }});
+                        }} else if (scroller) {{
+                            scroller.scrollTop = 0;
                         }}
-                    }} catch (e) {{}}
-                    if (count >= 10) clearInterval(timer);
-                }}, 80);
+                    }} catch (e) {{
+                        try {{ window.parent.location.hash = 'question-top'; }} catch (err) {{}}
+                    }}
+                }}
+                // Streamlitのスクロール位置復元に対抗して段階的に実行
+                [40, 120, 250, 450, 800].forEach(d => setTimeout(doScroll, d));
             }})();
         </script>
         """,
         height=0,
-        width=0,
-        key=f"comp_{unique_key}"
+        width=0
     )
 
 # --- 3. 認証・データロード関数 ---
@@ -659,7 +665,7 @@ else:
         
         # --- 出題中画面 ---
         else:
-            # ページ遷移時に最新のq_idxキー付きでスクロールを発火
+            # ページ遷移時に最新のq_idxでスクロールを実行
             scroll_to_question(q_idx)
 
             if st.session_state.q_start_time is None:
@@ -667,12 +673,12 @@ else:
 
             q = questions[q_idx]
             
-            # 問題の進行状況
+            # 進行状況表示
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
             st.progress((q_idx + 1) / total_q)
             
-            # ★ ここにヘッダー余白付きアンカーを配置（問題文の1行目がヘッダー直下に来る）
-            st.markdown('<div id="question-top" style="scroll-margin-top: 70px; display: block; height: 1px;"></div>', unsafe_allow_html=True)
+            # ★ 問題文直前にスクロール目標アンカーを配置
+            st.markdown('<div id="question-top" style="scroll-margin-top: 75px; height: 1px;"></div>', unsafe_allow_html=True)
             
             col_q, col_bm = st.columns([4, 1])
             with col_q:
