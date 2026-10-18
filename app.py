@@ -34,6 +34,8 @@ if "is_interrupted" not in st.session_state:
     st.session_state.is_interrupted = False
 if "q_start_time" not in st.session_state:
     st.session_state.q_start_time = None
+if "last_scrolled_q_idx" not in st.session_state:
+    st.session_state.last_scrolled_q_idx = -1
 
 # --- 2. 確実・高精度スクロール制御関数 ---
 def scroll_to_top():
@@ -89,7 +91,6 @@ def scroll_to_question(q_idx):
                             const targetRect = target.getBoundingClientRect();
                             const targetTop = targetRect.top - scrollerRect.top + scroller.scrollTop;
                             
-                            // ヘッダー被りを防ぐため上部マージンを引いて設定
                             scroller.scrollTop = Math.max(0, targetTop - 15);
                             target.scrollIntoView({{ behavior: 'auto', block: 'start' }});
                         }} else if (scroller) {{
@@ -99,7 +100,6 @@ def scroll_to_question(q_idx):
                         try {{ window.parent.location.hash = 'question-top'; }} catch (err) {{}}
                     }}
                 }}
-                // Streamlitのスクロール位置復元に対抗して段階的に実行
                 [40, 120, 250, 450, 800].forEach(d => setTimeout(doScroll, d));
             }})();
         </script>
@@ -597,6 +597,7 @@ else:
                         st.session_state.user_answers = []
                         st.session_state.quiz_saved = False
                         st.session_state.is_interrupted = False
+                        st.session_state.last_scrolled_q_idx = -1  # スクロール追跡をリセット
                         st.session_state.q_start_time = time.time()
                         st.session_state.quiz_started = True
                         st.rerun()
@@ -612,8 +613,8 @@ else:
         
         # --- 全問終了 または 途中中断時 ---
         if q_idx >= total_q or st.session_state.is_interrupted:
-            scroll_to_top()
             if not st.session_state.quiz_saved:
+                scroll_to_top()  # 結果画面への遷移時のみ最上部へ移動
                 st.session_state.correct_count = save_quiz_results(st.session_state.user.id, st.session_state.user_answers)
                 update_streak_and_counts(st.session_state.user.id, len(st.session_state.user_answers))
                 st.session_state.quiz_saved = True
@@ -630,6 +631,7 @@ else:
                 st.session_state.current_exam = None
                 st.session_state.quiz_saved = False
                 st.session_state.is_interrupted = False
+                st.session_state.last_scrolled_q_idx = -1
                 st.rerun()
 
             st.write("")
@@ -665,19 +667,20 @@ else:
         
         # --- 出題中画面 ---
         else:
-            # ページ遷移時に最新のq_idxでスクロールを実行
-            scroll_to_question(q_idx)
+            # ★ 問題が切り替わった最初の1回だけスクロールを実行（スライダー等の操作時は実行しない）
+            if st.session_state.last_scrolled_q_idx != q_idx:
+                scroll_to_question(q_idx)
+                st.session_state.last_scrolled_q_idx = q_idx
 
             if st.session_state.q_start_time is None:
                 st.session_state.q_start_time = time.time()
 
             q = questions[q_idx]
             
-            # 進行状況表示
             st.caption(f"問題 {q_idx + 1} / {total_q} （分野: {q['knowledge_category']}）")
             st.progress((q_idx + 1) / total_q)
             
-            # ★ 問題文直前にスクロール目標アンカーを配置
+            # スクロール目標アンカー
             st.markdown('<div id="question-top" style="scroll-margin-top: 75px; height: 1px;"></div>', unsafe_allow_html=True)
             
             col_q, col_bm = st.columns([4, 1])
